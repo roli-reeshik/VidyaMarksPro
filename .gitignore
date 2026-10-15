@@ -1,0 +1,22 @@
+# Environment & Secrets (Never commit database credentials)
+.env
+.env.*
+backend/.env
+backend/.env.*
+
+# Python Cache & Environments
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+env/
+
+# Node & Next.js Builds
+node_modules/
+frontend/node_modules/
+frontend/.next/
+.next/
+
+# Backups & Large Binaries
+db_backups/*.dump
+*.log

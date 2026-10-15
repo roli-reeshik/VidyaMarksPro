@@ -1,0 +1,101 @@
+Task: Implement Longitudinal Sem 1-8 Auto-Insertion for Final Evaluation Statement, Design & Marks Audit Logging, and Final Delivery Status Tagging
+
+Branding: VidyaMarksheet (Developed at VidyaLabs | Priyanka Kumari)
+
+EXECUTION & CONTEXT DIRECTIVE (STRICT & UNATTENDED):
+1. Autonomous & Uninterrupted Execution: Do NOT pause to ask questions or prompt for confirmations. Execute all schema updates, calculation pipelines, template modifications, and logging hooks autonomously to completion.
+2. Maintain Environment Consistency: Read configuration parameters strictly from `backend/.env` using the existing dual-environment setup (.env.office / .env.home).
+3. State Retention: Maintain and log execution stages (Schema Alterations -> Aggregator Service -> Template Ingestion -> Audit Trail Hooks -> PDF Delivery State) directly to the console.
+
+Requirements:
+
+================================================================================
+PART 1: LONGITUDINAL AUTO-INSERTION FOR SEMESTER 8 EVALUATION STATEMENT
+================================================================================
+1. Database Schema Extension (`cumulative_academic_summary`):
+   Ensure `cumulative_academic_summary` stores granular history for every student:
+   - `sem1_credits` (12), `sem1_sgpa`, `sem1_pct`
+   - `sem2_credits` (31), `sem2_sgpa`, `sem2_pct`
+   - `sem3_credits` (17), `sem3_sgpa`, `sem3_pct`
+   - `sem4_credits` (21), `sem4_sgpa`, `sem4_pct`
+   - `sem5_credits` (11), `sem5_sgpa`, `sem5_pct`
+   - `sem6_credits` (21), `sem6_sgpa`, `sem6_pct`
+   - `sem7_credits` (26), `sem7_sgpa`, `sem7_pct`
+   - `sem8_credits` (12), `sem8_sgpa`, `sem8_pct`
+   - `total_credits` (151.0), `cgpa`, `overall_percentage`, `overall_grade`, `grading_performance`, `final_result`
+
+2. Automatic Data Pipeline:
+   - When any semester examination (Sem 1 to 7) is approved, automatically upsert that semester's credits, SGPA, and Percentage into `cumulative_academic_summary`.
+   - When the 8th Semester marksheet is generated:
+     * Automatically fetch the historical records (Sem 1 through 7) for that student's `enrollment_no` / `roll_no`.
+     * Merge with the newly calculated 8th Semester scores.
+     * Compute CGPA: Sum(Credits_i * SGPA_i) / 151.0 (rounded to 2 decimal places).
+     * Compute Overall Percentage: Sum(Semester_Percentages) / 8.0 (rounded to 2 decimal places).
+     * Determine Overall Letter Grade and Grading Performance from INC 10-Point Scale:
+       - >= 85%: O (Outstanding)
+       - 80.00% - 84.99%: A+ (Excellent)
+       - 75.00% - 79.99%: A (Very Good)
+       - 65.00% - 74.99%: B+ (Good)
+       - 60.00% - 64.99%: B (Above Average)
+       - 50.00% - 59.99%: C (Average)
+       - < 50.00%: F (Fail)
+     * If all 8 semesters are passed, set `final_result = 'PASS'`. If any semester has pending backlogs, set `final_result = 'FAIL'`.
+
+3. Render Matching Template Layout (`Sem8Marksheet.tsx`):
+   Render the exact "FINAL ACADEMIC EVALUATION STATEMENT" table matching image_23891d.png:
+   - Grid Rows:
+     * Header: "FINAL ACADEMIC EVALUATION STATEMENT" (Spanning all columns)
+     * Row 1: Semesters | I | II | III | IV | V | VI | VII | VIII | Overall (colspan 3)
+     * Row 2: Semester Credit | 12 | 31 | 17 | 21 | 11 | 21 | 26 | 12 | Cumulative Grade Point Average (CGPA) | Letter Grade | Percentage (%)
+     * Row 3: SGPA | [S1] | [S2] | [S3] | [S4] | [S5] | [S6] | [S7] | [S8] | [CGPA] (rowspan 2) | [Grade] (rowspan 2) | [Overall Pct] (rowspan 2)
+     * Row 4: Percentage | [P1] | [P2] | [P3] | [P4] | [P5] | [P6] | [P7] | [P8]
+     * Row 5: Grading Performance: - [Performance] (colspan 8) | Final Result : [PASS/FAIL] (colspan 3)
+
+================================================================================
+PART 2: DUAL AUDIT LOGGING (DATA MODIFICATIONS & TEMPLATE DESIGN CHANGES)
+================================================================================
+1. Marks & Data Change Logging:
+   - In `backend/routes/examination_db_route.py` or evaluation controllers, intercept any update to student marks, personal details, or grace additions.
+   - Insert an entry into `marks_audit_log`:
+     [roll_no, semester_number, field_name, old_val, new_val, modified_by, modified_at, reason].
+
+2. Template Design & Layout Change Logging:
+   - Create table `template_design_audit_log`:
+     * `id` (SERIAL PRIMARY KEY)
+     * `semester_number` (SMALLINT)
+     * `changed_property` (VARCHAR(100), e.g., 'font_size', 'row_padding', 'writing_mode', 'column_width')
+     * `old_value` (TEXT)
+     * `new_value` (TEXT)
+     * `modified_by` (VARCHAR(100))
+     * `modified_at` (TIMESTAMP DEFAULT NOW())
+     * `notes` (TEXT)
+   - When the user saves overrides in the frontend "Marksheet Layout Studio", send a `POST /api/v1/layout/audit` to persist design history.
+
+================================================================================
+PART 3: FINAL DELIVERY LIFECYCLE & "FINAL COPY" WATERMARKING
+================================================================================
+1. Delivery Status State Machine:
+   - Add status column to `student_semester_registrations`:
+     `delivery_status` VARCHAR(20) DEFAULT 'PROVISIONAL'; 
+     -- Options: 'DRAFT', 'PROVISIONAL', 'FINAL' (Delivered)
+   - Add endpoint `POST /api/v1/marksheets/mark-as-final`:
+     * Accepts: `{ semester: number, roll_numbers: string[], delivered_by: string }`
+     * Updates `delivery_status = 'FINAL'` and records `delivered_at = NOW()`.
+
+2. Institutional Copy Tracking:
+   - When generating or printing the official institutional copies:
+     * If `delivery_status === 'FINAL'`:
+       - Embed footer tag: "Official Institutional Record — FINAL COPY (Issued to Candidate on [Date])".
+       - In internal audit preview, display a subtle security status badge: "STATUS: FINAL / ISSUED".
+       - Prevent any further unauthenticated editing of marks once marked as FINAL unless unlocked by Sub-Dean administrative override.
+
+================================================================================
+PART 4: VERIFICATION & SMOKE TEST
+================================================================================
+1. Add a test in `backend/tests/test_cumulative_sem8.py`:
+   - Seeds mock/real records for Semesters 1 to 7 with the exact values from the sample:
+     Credits: [12, 31, 17, 21, 11, 21, 26, 12]
+     SGPAs: [7.00, 7.45, 7.00, 6.33, 7.18, 6.19, 7.08, 10.00]
+     Percentages: [68.40, 75.43, 68.67, 66.29, 69.14, 63.80, 71.20, 94.50]
+   - Asserts that the computed CGPA equals 7.15, overall percentage equals 72.18%, letter grade equals B+, and result is PASS.
+2. Output a verification summary confirming that longitudinal calculation, audit logging, and delivery status tracking are fully operational.

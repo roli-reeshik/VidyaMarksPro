@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Marksheet - {{ student.student_name }} ({{ student.roll_no }})</title>
+  <style>
+    @page {
+      size: {{ template_config.paper_size if template_config else '8.5in 14in' }};
+      margin: {{ template_config.top_margin if template_config else '2.5in' }} {{ template_config.right_margin if template_config else '0.25in' }} {{ template_config.bottom_margin if template_config else '0.25in' }} {{ template_config.left_margin if template_config else '0.25in' }};
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #ffffff;
+      color: #000000;
+      font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+      font-size: {{ template_config.font_size_demo if template_config else '11pt' }};
+      line-height: 1.25;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    table, td, th, div, span, p {
+      font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+    }
+
+    /* Screen display: replicates exact letterhead clearance */
+    @media screen {
+      body {
+        width: 8.5in;
+        min-height: 14.0in;
+        margin: 0 auto;
+        padding-top: {{ template_config.top_margin if template_config else '2.5in' }};
+        padding-left: {{ template_config.left_margin if template_config else '0.25in' }};
+        padding-right: {{ template_config.right_margin if template_config else '0.25in' }};
+        padding-bottom: {{ template_config.bottom_margin if template_config else '0.25in' }};
+      }
+    }
+
+    /* Print display: @page provides the margins */
+    @media print {
+      body {
+        width: 100%;
+        margin: 0;
+        padding: 0;
+      }
+    }
+
+    .sheet-wrapper {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+
+    /* 1. Top Header Block - Strict Single Line */
+    .header-line {
+      text-align: center;
+      font-size: {{ template_config.font_size_header if template_config else '11pt' }};
+      font-weight: bold;
+      text-transform: uppercase;
+      white-space: nowrap;
+      letter-spacing: 0.2px;
+      margin-top: 0;
+      margin-bottom: 12px;
+    }
+
+    /* 2. Demographic Lines - All Details in Bold */
+    .demographics-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: none;
+      margin-bottom: 14px;
+      font-size: {{ template_config.font_size_demo if template_config else '11pt' }};
+      line-height: 1.55;
+    }
+
+    .demographics-table td {
+      border: none;
+      padding: 2px 0;
+      vertical-align: top;
+      color: #000000;
+      font-weight: bold;
+    }
+
+    .demo-left {
+      text-align: left;
+    }
+
+    .demo-right {
+      text-align: right;
+    }
+
+    /* 3. Main Marks Grid */
+    .marks-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1px solid #000000;
+      text-align: center;
+      font-size: {{ template_config.font_size_table if template_config else '10pt' }};
+      line-height: 1.2;
+    }
+
+    .marks-table th, .marks-table td {
+      border: 1px solid #000000;
+      padding: {{ template_config.cell_padding if template_config and template_config.cell_padding else 4 }}px 2px;
+      vertical-align: middle;
+      text-align: center;
+      color: #000000;
+      background-color: #ffffff;
+    }
+
+    .marks-table th {
+      font-weight: bold;
+      font-size: {{ template_config.font_size_table if template_config else '9.5pt' }};
+      padding: {{ template_config.cell_padding if template_config and template_config.cell_padding else 4 }}px 2px;
+      line-height: 1.15;
+    }
+
+    .marks-table td.cell-course-title {
+      text-align: center;
+      padding: {{ template_config.cell_padding if template_config and template_config.cell_padding else 4 }}px 3px;
+      line-height: 1.2;
+      font-weight: bold;
+    }
+
+    .marks-table tr.course-row {
+      height: {{ template_config.row_min_height if template_config and template_config.row_min_height else 42 }}px;
+    }
+
+    .marks-table tr.total-row {
+      height: 32px;
+      font-weight: bold;
+    }
+
+    .marks-table tr.total-row td {
+      font-weight: bold;
+    }
+
+    .pass-bold {
+      font-weight: bold;
+    }
+
+    /* 4. Notes & Abbreviations directly below table */
+    .under-table-flex {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 4px;
+      margin-bottom: 8px;
+      font-size: 9.5pt;
+    }
+
+    .college-exam-note {
+      text-align: left;
+      font-size: 9pt;
+    }
+
+    .abbrev-text {
+      text-align: right;
+      font-size: 9pt;
+      white-space: nowrap;
+    }
+
+    /* 5. SGPA / Credit Score Box */
+    .sgpa-box-table {
+      width: 65%;
+      margin: 10px auto 14px auto;
+      border-collapse: collapse;
+      border: 1px solid #000000;
+      text-align: center;
+    }
+
+    .sgpa-box-table td {
+      border: 1px solid #000000;
+      padding: 5px 8px;
+      text-align: center;
+      background-color: #ffffff;
+    }
+
+    .sgpa-header-cell {
+      font-weight: bold;
+      font-size: 10.5pt;
+    }
+
+    .sgpa-val-cell {
+      font-weight: bold;
+      font-size: 11pt;
+    }
+
+    /* Vertical text cell alignments */
+    .vertical-cell-wrapper {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      width: 100%;
+      height: 100%;
+    }
+
+    .vertical-text {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      text-orientation: mixed;
+      white-space: normal;
+      display: inline-block;
+      text-align: center;
+      line-height: 1.15;
+    }
+
+    .vertical-text.nowrap {
+      white-space: nowrap !important;
+    }
+
+    .vertical-text-subline {
+      display: block;
+      margin: 0 1px;
+    }
+
+    /* Distinct 2-row, 2-column Bordered Results & Remarks Table */
+    .result-remarks-table {
+      width: 100% !important;
+      border: 1.5px solid #000000 !important;
+      border-collapse: collapse !important;
+      margin-top: 6px;
+      margin-bottom: 6px;
+    }
+
+    .result-remarks-table td {
+      padding: 4px 8px !important;
+      font-size: 10.5pt !important;
+      line-height: 1.35;
+      color: #000000;
+      background: #ffffff;
+    }
+
+    .result-remarks-table tr:first-child {
+      border-bottom: 1.5px solid #000000 !important;
+    }
+
+    .result-remarks-table td.col-label {
+      width: 18% !important;
+      border-right: 1.5px solid #000000 !important;
+      font-weight: bold !important;
+      text-align: center !important;
+    }
+
+    .result-remarks-table td.col-value {
+      font-weight: bold !important;
+      text-align: center !important;
+    }
+
+    /* Signatures Section */
+    .signatures-row {
+      display: flex;
+      justify-content: space-between;
+      margin-top: {{ template_config.signature_margin_top if template_config and template_config.signature_margin_top else '28px' }};
+      margin-bottom: 8px;
+      text-align: center;
+      padding: 0 10px;
+    }
+
+    /* Statutory Note: after signatures and before date */
+    .statutory-note {
+      margin-top: 6px;
+      margin-bottom: 8px;
+      font-size: 9.5pt;
+      line-height: 1.35;
+      text-align: justify;
+    }
+
+    .sig-col {
+      width: 28%;
+      text-align: center;
+    }
+
+    .sig-clearance {
+      height: {{ template_config.signature_space if template_config and template_config.signature_space else 65 }}px;
+      min-height: {{ template_config.signature_space if template_config and template_config.signature_space else 65 }}px;
+    }
+
+    .sig-underline {
+      border-top: 1px solid #000000;
+      margin-bottom: 5px;
+      width: 100%;
+    }
+
+    .sig-title {
+      font-size: 10.5pt;
+      font-weight: bold;
+    }
+
+    /* Bottom-most row: Date & Legend Overleaf */
+    .date-legend-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 10pt;
+      font-weight: bold;
+      margin-bottom: 6px;
+      padding: 0 4px;
+    }
+
+    /* Branding Footer */
+    .platform-branding {
+      border-top: 1px dotted #888888;
+      padding-top: 3px;
+      text-align: center;
+      font-size: 7.5pt;
+      color: #333333;
+      font-family: Calibri, Arial, sans-serif;
+    }
+  </style>
+</head>
+<body>
+  <div class="sheet-wrapper">
+    <div class="top-main-content">
+      <!-- Center Line 1 (Bold, Upper Case, Strictly in One Line) -->
+      <div class="header-line">
+        {% if template_config and template_config.exam_title %}{{ template_config.exam_title }}{% else %}B.Sc.NURSING {% if semester_number in [1, 2] %}FIRST YEAR{% elif semester_number in [3, 4] %}SECOND YEAR{% elif semester_number in [5, 6] %}THIRD YEAR{% else %}FOURTH YEAR{% endif %} ({% if semester_number == 2 %}SECOND SEMESTER{% elif semester_number == 3 %}THIRD SEMESTER{% elif semester_number == 4 %}FOURTH SEMESTER{% elif semester_number == 5 %}FIFTH SEMESTER{% elif semester_number == 6 %}SIXTH SEMESTER{% elif semester_number == 7 %}SEVENTH SEMESTER{% elif semester_number == 8 %}EIGHTH SEMESTER{% else %}FIRST SEMESTER{% endif %}) UNIVERSITY EXAMINATION {% if attempt_indicator %}{{ attempt_indicator }} {% elif attempt_label and attempt_label != 'MAIN' %}({{ attempt_label }}) {% endif %}{{ session_month_year | upper }}{% endif %}
+      </div>
+
+      <!-- Demographic Lines (Table / Flex Grid without borders - All in Bold) -->
+      <table class="demographics-table">
+        <tr>
+          <td class="demo-left"><b>NAME: {{ student.student_name }}</b></td>
+          <td class="demo-right"><b>ENROLLMENT NO: {{ student.enroll_no }}</b></td>
+        </tr>
+        <tr>
+          <td class="demo-left"><b>S/o/D/o: {{ student.father_name }}</b></td>
+          <td class="demo-right"><b>ROLL NO: {{ student.roll_no }}</b></td>
+        </tr>
+        <tr>
+          <td colspan="2" class="demo-left"><b>NAME OF COLLEGE: {{ template_config.college_name if template_config else 'COLLEGE OF NURSING' }}, {{ template_config.institution_name if template_config else 'SGPGIMS, LUCKNOW, UTTAR PRADESH' }}.</b></td>
+        </tr>
+      </table>
+
+      <!-- Main Marks Grid (Exact 11 Columns with Dual Sub-Headers) -->
+      <table class="marks-table">
+        <thead>
+          <tr>
+            <th rowspan="2" style="width: {{ template_config.col_width_sno if template_config and template_config.col_width_sno else 4.5 }}%;">{{ template_config.col_label_sno if template_config else 'Sl.No.' }}</th>
+            <th rowspan="2" style="width: {{ template_config.col_width_code if template_config and template_config.col_width_code else 14 }}%;">{{ template_config.col_label_course_code if template_config else 'Course Code' }}</th>
+            <th rowspan="2" style="width: {{ template_config.col_width_title if template_config and template_config.col_width_title else 16 }}%;">{{ template_config.col_label_course_title if template_config else 'Title of Course' }}</th>
+            <th rowspan="2" style="width: {{ template_config.col_width_credits if template_config and template_config.col_width_credits else 7 }}%;">{{ template_config.col_label_credits if template_config else 'Course Credits' }}</th>
+            <th colspan="2" style="width: 11.5%;">{{ template_config.col_label_internal if template_config else 'Internal Assesment Marks' }}</th>
+            <th colspan="2" style="width: 13.5%;">{{ template_config.col_label_external if template_config else 'End Semester University Exam Marks' }}</th>
+            <th colspan="2" style="width: 13.5%;">{{ template_config.col_label_total if template_config else 'Total Marks' }}</th>
+            <th rowspan="2" style="width: 6.5%;">Final Marks (%)</th>
+            <th rowspan="2" style="width: 5%;">{{ template_config.col_label_grade if template_config else 'Letter Grade' }}</th>
+            <th rowspan="2" style="width: 5%;">{{ template_config.col_label_grade_point if template_config else 'Grade Point' }}</th>
+            <th rowspan="2" style="width: 5%;">Result</th>
+          </tr>
+          <tr>
+            <th style="width: 5%;">Obtd</th>
+            <th style="width: 4.5%;">Max</th>
+            <th style="width: 5.5%;">Obtd</th>
+            <th style="width: 5%;">Max</th>
+            <th style="width: 5.5%;">Obtd</th>
+            <th style="width: 5%;">Max</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for item in course_rows %}
+          <tr class="course-row">
+            <td>{{ "%02d." | format(loop.index) }}</td>
+            <td>
+              {% if template_config and template_config.text_direction_code == 'vertical' %}
+                <div class="vertical-cell-wrapper"><span class="vertical-text"><b>{{ item.course_code }}</b></span></div>
+              {% else %}
+                <b>{{ item.course_code }}</b>
+              {% endif %}
+            </td>
+            <!-- Subjects / Course Titles in Bold -->
+            <td class="cell-course-title">
+              {% if template_config and template_config.text_direction_title == 'vertical' %}
+                <div class="vertical-cell-wrapper"><span class="vertical-text"><b>{% if item.is_english_or_elective %}*{{ item.course_title }}{% else %}{{ item.course_title }}{% endif %}</b></span></div>
+              {% else %}
+                <b>{% if item.is_english_or_elective %}*{{ item.course_title }}{% else %}{{ item.course_title }}{% endif %}</b>
+              {% endif %}
+            </td>
+            <td>
+              {% if item.credit_breakdown %}
+                {{ item.credits }}<br>{{ item.credit_breakdown }}
+              {% elif item.credits == 6 and semester_number == 4 %}
+                6<br>(4+2)
+              {% elif item.credits == 6 %}
+                6<br>(3+3)
+              {% else %}
+                {{ item.credits }}
+              {% endif %}
+            </td>
+            <td>{% if item.is_exempted or item.internal_marks == 'Ex.' %}Ex.{% else %}{{ format_mark(item.internal_marks) }}{% endif %}</td>
+            <td>{{ item.internal_max | int }}</td>
+            <td>{% if item.is_exempted or item.effective_external == 'Ex.' %}Ex.{% else %}{{ format_mark(item.effective_external) }}{% endif %}</td>
+            <td>{{ item.external_max | int }}</td>
+            <td>{{ format_mark(item.total_marks) }}</td>
+            <td>{{ item.total_max | int }}</td>
+            <td>{{ item.percentage | format_decimal }}</td>
+            <td><b>{{ item.letter_grade }}</b></td>
+            <td>{{ item.grade_point }}</td>
+            <!-- PASS / Fail in Bold -->
+            <td class="pass-bold"><b>{{ "PASS" if item.is_pass else "Fail" }}</b></td>
+          </tr>
+          {% endfor %}
+
+          <!-- In-Table Total Row - Grand Totals in Bold -->
+          <tr class="total-row">
+            <td colspan="3"><b>Total Credit</b></td>
+            <td><b>{{ total_prescribed_credits }}</b></td>
+            <td colspan="4"><b>Grand Total</b></td>
+            <td><b>{{ format_mark(student.total_marks_obtained) }}</b></td>
+            <td><b>{{ student.total_marks_max | int }}</b></td>
+            <td><b>{{ student.overall_percentage | format_decimal }}</b></td>
+            <td><b>-</b></td>
+            <td><b>-</b></td>
+            <td><b>-</b></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <!-- Under Table Explanatory Note & Abbreviations -->
+      <div class="under-table-flex">
+        <div class="college-exam-note">
+          * College Exam, Marks are not added for calculating SGPA, Pass marks-40% as per INC, New Delhi
+        </div>
+        <div class="abbrev-text">
+          Obtd. : Obtained &nbsp;&nbsp;&nbsp;&nbsp; Max. : Maximum
+        </div>
+      </div>
+
+      <!-- SGPA / Credit Score Box -->
+      <table class="sgpa-box-table">
+        <tr>
+          <td class="sgpa-header-cell">Semester Grade Point Average (SGPA)</td>
+          <td class="sgpa-header-cell">Semester Credit Score Average</td>
+        </tr>
+        <tr>
+          <td class="sgpa-val-cell">{{ student.sgpa | format_decimal }}</td>
+          <td class="sgpa-val-cell">{{ student.semester_credit_score | format_decimal }}</td>
+        </tr>
+      </table>
+
+      <!-- Distinct Bordered Results & Remarks Table (2-row, 2-column) -->
+      <table class="result-remarks-table">
+        <tbody>
+          <tr>
+            <td class="col-label">Result</td>
+            <td class="col-value">{{ display_result }}</td>
+          </tr>
+          <tr>
+            <td class="col-label">Remarks</td>
+            <td class="col-value">Grading Performance - {{ performance_descriptor }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Bottom Institutional Footer & Signatures -->
+    <div class="bottom-signatures-footer">
+      <!-- Signatures Row -->
+      <div class="signatures-row">
+        <div class="sig-col">
+          <div class="sig-clearance"></div>
+          <div class="sig-underline"></div>
+          <div class="sig-title">{{ template_config.sig1_title if template_config else 'Prepared By' }}</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-clearance"></div>
+          <div class="sig-underline"></div>
+          <div class="sig-title">{{ template_config.sig2_title if template_config else 'Checked By' }}</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-clearance"></div>
+          <div class="sig-underline"></div>
+          <div class="sig-title">{{ template_config.sig3_title if template_config else 'Sub-Dean (Nursing)' }}</div>
+        </div>
+        {% if template_config and template_config.show_sig4 %}
+        <div class="sig-col">
+          <div class="sig-clearance"></div>
+          <div class="sig-underline"></div>
+          <div class="sig-title">{{ template_config.sig4_title }}</div>
+        </div>
+        {% endif %}
+      </div>
+
+      <!-- Statutory Note: strictly after signatures and before date/legend overleaf -->
+      <div class="statutory-note">
+        {{ (template_config.statutory_note if template_config and template_config.statutory_note else "<b>Note:</b> In case of any discrepancy in the marksheet, candidate may apply for correction within a period of four weeks from the date of issue to the office of the Executive Registrar.") | safe }}
+      </div>
+
+      <!-- Bottom-most Left Date & Right Legend Overleaf -->
+      <div class="date-legend-row">
+        <div><b>Date:</b> {{ issue_date }}</div>
+        <div><b>Legend Overleaf</b></div>
+      </div>
+
+      <!-- Branding line -->
+      <div class="platform-branding">
+        VidyaMarksheet (Developed at <b>VidyaLabs</b> | Contact: <b>Priyanka Kumari</b> (+91-9140189586))
+      </div>
+
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Tabulation Register - B.Sc. Nursing {{ data.semester_name }} ({{ data.batch_name }})</title>
+  <style>
+    @page {
+      size: A3 landscape;
+      margin: 8mm;
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-print-color-adjust: exact;
+      print-color-adjust: exact;
+    }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      background-color: #f1f5f9;
+      color: #0f172a;
+      font-family: Calibri, 'Segoe UI', Arial, sans-serif;
+      font-size: 8.5pt;
+      line-height: 1.25;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* Screen display: page card representation */
+    @media screen {
+      .tr-page {
+        width: 16.5in;
+        min-height: 11.2in;
+        margin: 20px auto;
+        padding: 8mm;
+        background: #ffffff;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+        border: 1px solid #cbd5e1;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+    }
+
+    /* Print display: strict page break per group */
+    @media print {
+      body {
+        background-color: #ffffff;
+      }
+      .tr-page {
+        width: 100%;
+        height: 100%;
+        padding: 0;
+        margin: 0;
+        background: #ffffff;
+        box-shadow: none;
+        border: none;
+        page-break-after: always;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+      }
+      .no-print {
+        display: none !important;
+      }
+    }
+
+    /* 1. Header Styles */
+    .tr-header {
+      text-align: center;
+      margin-bottom: 6px;
+      border-bottom: 2px solid #1e3a8a;
+      padding-bottom: 5px;
+    }
+
+    .tr-inst-title {
+      font-size: 13pt;
+      font-weight: bold;
+      color: #1e3a8a;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin: 0 0 1px 0;
+    }
+
+    .tr-college-title {
+      font-size: 10.5pt;
+      font-weight: bold;
+      color: #0f172a;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      margin: 0 0 2px 0;
+    }
+
+    .tr-exam-banner {
+      font-size: 10pt;
+      font-weight: bold;
+      color: #1d4ed8;
+      text-transform: uppercase;
+      letter-spacing: 0.2px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      display: inline-block;
+      padding: 2px 14px;
+      border-radius: 3px;
+      margin-bottom: 3px;
+    }
+
+    .tr-meta-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 8pt;
+      font-weight: 600;
+      color: #334155;
+      padding: 2px 4px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 2px;
+      margin-top: 3px;
+    }
+
+    /* 2. Main Tabular Grid */
+    .tr-table-container {
+      flex: 1;
+      width: 100%;
+      margin: 4px 0;
+    }
+
+    .tr-table {
+      width: 100%;
+      border-collapse: collapse;
+      border: 1.5px solid #0f172a;
+      font-size: 8pt;
+      text-align: center;
+    }
+
+    .tr-table th, .tr-table td {
+      border: 1px solid #334155;
+      padding: 2.5px 2px;
+      vertical-align: middle;
+    }
+
+    /* Table Headers */
+    .th-tier1 {
+      background: #0f172a;
+      color: #ffffff;
+      font-weight: bold;
+      font-size: 8pt;
+      text-transform: uppercase;
+    }
+
+    .th-tier1-course {
+      background: #1e293b;
+      color: #ffffff;
+      font-weight: bold;
+      font-size: 7.5pt;
+      border-left: 1.5px solid #0f172a;
+      border-right: 1.5px solid #0f172a;
+    }
+
+    .th-tier2-sub {
+      background: #334155;
+      color: #f8fafc;
+      font-weight: bold;
+      font-size: 7.5pt;
+    }
+
+    /* Data rows */
+    .tr-row-even {
+      background: #ffffff;
+    }
+
+    .tr-row-odd {
+      background: #f8fafc;
+    }
+
+    .cell-sno {
+      width: 24px;
+      font-weight: 600;
+    }
+
+    .cell-roll {
+      width: 68px;
+      font-weight: bold;
+      font-family: 'Consolas', monospace;
+      font-size: 8pt;
+    }
+
+    .cell-enroll {
+      width: 76px;
+      font-family: 'Consolas', monospace;
+      font-size: 7.5pt;
+    }
+
+    .cell-name {
+      text-align: left !important;
+      padding-left: 5px !important;
+      font-weight: bold;
+      min-width: 120px;
+      max-width: 150px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .cell-father {
+      text-align: left !important;
+      padding-left: 5px !important;
+      min-width: 100px;
+      max-width: 130px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      color: #334155;
+    }
+
+    .cell-mark {
+      font-size: 7.5pt;
+      width: 25px;
+    }
+
+    .cell-grade {
+      font-weight: bold;
+      width: 24px;
+      font-size: 8pt;
+    }
+
+    .cell-tot {
+      font-weight: 600;
+      width: 27px;
+    }
+
+    .cell-grand {
+      font-weight: bold;
+      font-size: 8pt;
+      background: #f1f5f9;
+      width: 44px;
+    }
+
+    .cell-pct {
+      font-weight: 600;
+      font-size: 8pt;
+      width: 36px;
+    }
+
+    .cell-sgpa {
+      font-weight: bold;
+      font-size: 8.5pt;
+      background: #eff6ff;
+      color: #1e3a8a;
+      width: 36px;
+    }
+
+    .cell-status {
+      font-weight: bold;
+      font-size: 7.5pt;
+      text-transform: uppercase;
+      min-width: 85px;
+      max-width: 125px;
+      padding: 2px 3px;
+    }
+
+    .status-pass {
+      color: #15803d;
+      font-weight: bold;
+    }
+
+    .status-fail {
+      color: #b91c1c;
+      font-weight: bold;
+    }
+
+    .status-grace {
+      color: #b45309;
+      font-weight: bold;
+    }
+
+    .status-reappear {
+      color: #1d4ed8;
+      font-weight: bold;
+    }
+
+    .cell-ex {
+      color: #0369a1;
+      font-weight: bold;
+    }
+
+    /* 3. Footer & Signatures Block */
+    .tr-footer {
+      margin-top: 6px;
+      padding-top: 4px;
+      border-top: 1.5px solid #0f172a;
+    }
+
+    .signatures-grid {
+      display: flex;
+      justify-content: space-between;
+      margin-top: 20px;
+      margin-bottom: 8px;
+      padding: 0 10px;
+      text-align: center;
+    }
+
+    .sig-col {
+      width: 22%;
+    }
+
+    .sig-line {
+      border-top: 1px solid #0f172a;
+      margin-bottom: 3px;
+      width: 100%;
+    }
+
+    .sig-title {
+      font-weight: bold;
+      font-size: 8pt;
+      color: #0f172a;
+      text-transform: uppercase;
+    }
+
+    .sig-sub {
+      font-size: 7pt;
+      color: #475569;
+    }
+
+    .tr-bottom-strip {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 7pt;
+      color: #64748b;
+      border-top: 1px dotted #cbd5e1;
+      padding-top: 3px;
+      margin-top: 4px;
+    }
+
+    .badge-reappear {
+      display: inline-block;
+      font-size: 6.5pt;
+      background: #e0f2fe;
+      color: #0369a1;
+      padding: 1px 3px;
+      border-radius: 2px;
+      margin-left: 2px;
+      border: 0.5px solid #bae6fd;
+    }
+  </style>
+</head>
+<body>
+
+  {% for page in data.pages %}
+  <div class="tr-page">
+    
+    <!-- Top Header -->
+    <div class="tr-header">
+      <div class="tr-inst-title">SANJAY GANDHI POSTGRADUATE INSTITUTE OF MEDICAL SCIENCES, LUCKNOW</div>
+      <div class="tr-college-title">COLLEGE OF NURSING</div>
+      <div class="tr-exam-banner">
+        TABULATION REGISTER FOR B.Sc. NURSING {{ data.semester_name | upper }} EXAMINATION {{ data.session_month_year | upper }}
+      </div>
+      <div class="tr-meta-bar">
+        <span><b>COHORT BATCH:</b> {{ data.batch_name }}</span>
+        <span><b>DEGREE:</b> B.Sc. NURSING (4-YEAR DEGREE PROGRAM)</span>
+        <span><b>INSTITUTION CODE:</b> 1313</span>
+        <span><b>EXAM CYCLE:</b> {{ data.exam_type }}</span>
+        <span><b>DATE OF TABULATION:</b> {{ data.issue_date }}</span>
+      </div>
+    </div>
+
+    <!-- Main Tabulation Ledger Grid -->
+    <div class="tr-table-container">
+      <table class="tr-table">
+        <thead>
+          <!-- Tier 1 Headers -->
+          <tr>
+            <th class="th-tier1" rowspan="2" style="width: 24px;">S.No</th>
+            <th class="th-tier1" rowspan="2" style="width: 70px;">Roll No</th>
+            <th class="th-tier1" rowspan="2" style="width: 78px;">Enrollment No</th>
+            <th class="th-tier1" rowspan="2" style="min-width: 125px;">Candidate Name</th>
+            <th class="th-tier1" rowspan="2" style="min-width: 110px;">Father's Name</th>
+            
+            {% for c in data.courses %}
+            <th class="th-tier1-course" colspan="4">
+              {{ c.course_code }}<br>
+              <span style="font-size: 6.5pt; font-weight: normal; opacity: 0.9;">{{ c.short_title }} (Cr:{{ c.credits }})</span>
+            </th>
+            {% endfor %}
+
+            <th class="th-tier1" rowspan="2" style="width: 44px;">Grand<br>Tot</th>
+            <th class="th-tier1" rowspan="2" style="width: 38px;">%</th>
+            <th class="th-tier1" rowspan="2" style="width: 38px;">SGPA</th>
+            <th class="th-tier1" rowspan="2" style="min-width: 95px;">Result Status</th>
+          </tr>
+
+          <!-- Tier 2 Sub-Headers for Subjects -->
+          <tr>
+            {% for c in data.courses %}
+            <th class="th-tier2-sub cell-mark" title="Internal Assessment (Max: {{ c.ia_max | int }})">IA</th>
+            <th class="th-tier2-sub cell-mark" title="End Semester University Exam (Max: {{ c.ea_max | int }})">EA</th>
+            <th class="th-tier2-sub cell-tot" title="Total Marks (Max: {{ c.total_max | int }})">Tot</th>
+            <th class="th-tier2-sub cell-grade" title="Letter Grade">Grd</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in page.students %}
+          <tr class="{{ 'tr-row-even' if loop.index % 2 == 1 else 'tr-row-odd' }}">
+            <td class="cell-sno">{{ s.sl_no }}.</td>
+            <td class="cell-roll">{{ s.roll_no }}</td>
+            <td class="cell-enroll">{{ s.enroll_no }}</td>
+            <td class="cell-name">
+              {{ s.student_name }}
+              {% if s.attempt_label and s.attempt_label != 'MAIN' %}
+              <span class="badge-reappear">{{ s.attempt_label }}</span>
+              {% endif %}
+            </td>
+            <td class="cell-father">{{ s.father_name }}</td>
+
+            {% for c in data.courses %}
+              {% set m = s.course_marks.get(c.course_code) %}
+              {% if m %}
+                <td class="cell-mark {{ 'cell-ex' if m.is_exempted else '' }}">{{ m.ia }}</td>
+                <td class="cell-mark {{ 'cell-ex' if m.is_exempted else '' }}">{{ m.ea }}</td>
+                <td class="cell-tot"><b>{{ m.total }}</b></td>
+                <td class="cell-grade" style="color: {{ '#b91c1c' if m.grade == 'F' else '#0f172a' }};">
+                  {{ m.grade }}
+                </td>
+              {% else %}
+                <td class="cell-mark">-</td>
+                <td class="cell-mark">-</td>
+                <td class="cell-tot">-</td>
+                <td class="cell-grade">-</td>
+              {% endif %}
+            {% endfor %}
+
+            <td class="cell-grand"><b>{{ s.grand_total }}</b></td>
+            <td class="cell-pct">{{ s.percentage }}</td>
+            <td class="cell-sgpa"><b>{{ s.sgpa }}</b></td>
+            <td class="cell-status">
+              {% if "CLEARED IN REAPPEAR" in s.result_status %}
+                <span class="status-reappear">{{ s.result_status }}</span>
+              {% elif "PASS WITH" in s.result_status or "PWG" in s.result_status %}
+                <span class="status-grace">{{ s.result_status }}</span>
+              {% elif "PASS" in s.result_status %}
+                <span class="status-pass">PASS</span>
+              {% else %}
+                <span class="status-fail">{{ s.result_status }}</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <!-- Statutory Signatures & Running Page Footer -->
+    <div class="tr-footer">
+      <div class="signatures-grid">
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-title">Tabulated By</div>
+          <div class="sig-sub">Dealing Assistant / Tabulator</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-title">Verified By</div>
+          <div class="sig-sub">Scrutinizer / Section Officer</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-title">Assistant Registrar (Exams)</div>
+          <div class="sig-sub">SGPGIMS Examination Section</div>
+        </div>
+        <div class="sig-col">
+          <div class="sig-line"></div>
+          <div class="sig-title">Controller of Examinations / Sub-Dean</div>
+          <div class="sig-sub">SGPGI College of Nursing, Lucknow</div>
+        </div>
+      </div>
+
+      <div class="tr-bottom-strip">
+        <span><b>VidyaMarksheet</b> | Official Gazette Tabulation Register (A3/Legal Landscape) &bull; Copyright &copy; VidyaLabs (Priyanka Kumari)</span>
+        <span><b>Total Appeared:</b> {{ data.total_appeared }} &bull; <b>Passed:</b> {{ data.total_passed }} &bull; <b>Failed:</b> {{ data.total_failed }} &bull; <b>Pass %:</b> {{ data.pass_percentage }}%</span>
+        <span><b>Page {{ page.page_number }} of {{ data.pages | length }}</b></span>
+      </div>
+    </div>
+
+  </div>
+  {% endfor %}
+
+</body>
+</html>

@@ -1,0 +1,123 @@
+' Generating Marksheet
+Sub Generate_Marksheet()
+ Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim currentRow As Long
+    Dim nm As String
+    Dim no, k, fro, tu As Integer
+    k = 2
+    
+    ' Set your worksheet (change "Sheet1" to your actual sheet name)
+    Set ws = Sheet1
+    
+    ' Find the last row with data in column A
+    lastRow = ws.Cells(ws.Rows.Count, "B").End(xlUp).Row
+    
+    ' Loop through each row with data
+    fro = InputBox("Enter Where to Start? > = 4 ", "Start From!!!")
+               
+    tu = InputBox("Enter Up To Which? >= 47", "End At!!!")
+    
+    For currentRow = fro To tu '''lastRow9-54
+        ' Call your function here (replace YourFunction with your actual function name)
+        
+        
+        
+        nm = ws.Range("B" & currentRow).Value
+        Fill_Marks (currentRow)
+        ExportRangeToPDF nm
+    
+    Next currentRow
+    
+    Set ws = Nothing
+End Sub
+
+
+' Fetching Records
+Sub Fill_Marks(crw As Long)
+    Dim sourceSheet As Worksheet
+    Dim destinationSheet As Worksheet
+    '''Dim lastRow As Long
+    Dim i As Long
+    '''Dim searchName As String
+    '''Dim foundRange, rown As Range
+    i = crw
+    ' Set the source and destination worksheets
+    Set sourceSheet = Sheet1 ' Change "SourceSheet" to the actual name of your source sheet
+    Set destinationSheet = Sheet2 ' Change "DestinationSheet" to the actual name of your destination sheet
+    
+    
+        'destinationSheet.Range("j5").Value = sourceSheet.Range("C7").Value Year in Marksheet
+        'LABLES
+        destinationSheet.Range("A13").Value = "NAME:  "
+        destinationSheet.Range("K13").Value = "ENROLLMENT NO:  "
+        destinationSheet.Range("K15").Value = "ROLL NO:  "
+        destinationSheet.Range("A15").Value = "S/o / D/o:  "
+        
+        destinationSheet.Range("A13").Value = destinationSheet.Range("A13").Value & sourceSheet.Range("B" & i).Value
+        destinationSheet.Range("K13").Value = destinationSheet.Range("K13").Value & sourceSheet.Range("D" & i).Value
+        destinationSheet.Range("A15").Value = destinationSheet.Range("A15").Value & sourceSheet.Range("C" & i).Value
+        destinationSheet.Range("K15").Value = destinationSheet.Range("K15").Value & sourceSheet.Range("E" & i).Value
+        
+        'Storing Marks for 301 (T)
+        destinationSheet.Range("E21").Value = sourceSheet.Range("F" & i).Value
+        destinationSheet.Range("G21").Value = sourceSheet.Range("G" & i).Value
+        
+        'Storing Marks for 301 (P)
+        destinationSheet.Range("E22").Value = sourceSheet.Range("U" & i).Value
+        destinationSheet.Range("G22").Value = sourceSheet.Range("V" & i).Value
+        
+        
+        'Storing Marks for 305 (T)
+        destinationSheet.Range("E23").Value = sourceSheet.Range("K" & i).Value
+        destinationSheet.Range("G23").Value = sourceSheet.Range("L" & i).Value
+        
+        'Storing Marks for 305 (P)
+        destinationSheet.Range("E24").Value = sourceSheet.Range("Z" & i).Value
+        destinationSheet.Range("G24").Value = sourceSheet.Range("AA" & i).Value
+        
+        'Storing Marks for 330
+        destinationSheet.Range("E25").Value = sourceSheet.Range("P" & i).Value 'OK
+        destinationSheet.Range("G25").Value = sourceSheet.Range("Q" & i).Value
+        
+        destinationSheet.Range("F32").Value = sourceSheet.Range("AH" & i).Value
+        sourceSheet.Range("AG" & i) = destinationSheet.Range("B32").Value
+        destinationSheet.Range("I26").Value = sourceSheet.Range("AI" & i).Value
+        
+        
+    End Sub
+    
+    ' Creating PDF
+    Sub ExportRangeToPDF(flname As String)
+    Dim exportRange As Range
+    Dim pdfFileName As String
+    Dim saveFolder As String
+    pdfFileName = flname
+    ' Set the range to be exported (change "Sheet1" to the actual sheet name)
+     Set exportRange = Sheet2.Range("A1:N44") ' Change the range as needed
+
+    ' Get the PDF file name from the form control (change "TextBox1" to the actual form control name)
+    '''pdfFileName = Me.Label41.Caption  ' Change the form control name as needed
+
+    ' Validate if the form control has a valid name
+    If pdfFileName = "" Then
+        MsgBox "Please enter a valid name in the form control."
+        Exit Sub
+    End If
+
+    ' Specify the folder to save the PDF (change "C:\Your\Folder\Path\" to the desired folder path)
+    saveFolder = "G:\Examination\MARKS DATA\17.Data sheet B.Sc.Nursing Third Year (Sixth semester) Examination held in Aug-2025\Batch 2022 Sixth Semester-Exam (August 2025)\Fail Students\" ' Change the folder path as needed
+
+    ' Create the full path for the PDF file
+    pdfFileName = saveFolder & pdfFileName & ".pdf"
+   'MsgBox "File Saved" 'Comment This as it will come for 60 times.
+    ' Export the range to PDF
+    exportRange.ExportAsFixedFormat Type:=xlTypePDF, Filename:=pdfFileName, Quality:=xlQualityStandard
+    'MsgBox "PDF Created"
+           
+End Sub
+
+
+
+
+
