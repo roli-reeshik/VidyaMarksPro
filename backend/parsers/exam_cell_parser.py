@@ -7,9 +7,93 @@ Compliant with INC Gazette & SGPGIMS Lucknow Regulations.
 
 import re
 import io
+import zipfile
 from typing import Dict, List, Optional, Tuple, Any, Union
 import openpyxl
+import openpyxl.worksheet.filters as filters
 import pandas as pd
+
+# -------------------------------------------------------------------------
+# Openpyxl CustomFilter Descriptor Monkeypatch & File Cleaner
+# -------------------------------------------------------------------------
+def patch_openpyxl_filters() -> None:
+    """
+    Applies an in-memory monkeypatch to openpyxl filter descriptors to prevent:
+    ValueError("Value must be either numerical or a string containing a wildcard")
+    when encountering Excel custom filters with arbitrary text expressions.
+    """
+    if hasattr(filters, "CustomFilterValueDescriptor"):
+        orig_set = getattr(filters.CustomFilterValueDescriptor, "__set__", None)
+
+        def safe_descriptor_set(self, instance, value):
+            try:
+                if isinstance(value, str):
+                    m = getattr(self, "pattern", None)
+                    if m and (not m.match(value) or "*" in value):
+                        self.expected_type = str
+                if orig_set:
+                    return orig_set(self, instance, value)
+            except Exception:
+                pass
+            attr_name = getattr(self, "name", "val")
+            instance.__dict__[attr_name] = value
+
+        filters.CustomFilterValueDescriptor.__set__ = safe_descriptor_set
+    else:
+        class CustomFilterValueDescriptor:
+            pattern = re.compile(r".*")
+            name = "val"
+
+            def __init__(self, name="val"):
+                self.name = name
+
+            def __set__(self, instance, value):
+                instance.__dict__[self.name] = value
+
+        filters.CustomFilterValueDescriptor = CustomFilterValueDescriptor
+
+# Execute patch immediately on module load
+patch_openpyxl_filters()
+
+
+def clean_excel_filters_xml(file_bytes: bytes) -> bytes:
+    """
+    Cleans problematic Excel autoFilter/customFilter XML elements directly
+    from worksheet XMLs in-memory without modifying any cell values, formulas, or formatting.
+    """
+    if not zipfile.is_zipfile(io.BytesIO(file_bytes)):
+        return file_bytes
+    try:
+        in_buf = io.BytesIO(file_bytes)
+        out_buf = io.BytesIO()
+        with zipfile.ZipFile(in_buf, "r") as zin, zipfile.ZipFile(out_buf, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                content = zin.read(item.filename)
+                if item.filename.startswith("xl/worksheets/sheet") and item.filename.endswith(".xml"):
+                    content_str = content.decode("utf-8", errors="ignore")
+                    cleaned = re.sub(r'<customFilters[^>]*>.*?</customFilters>', '', content_str, flags=re.DOTALL)
+                    cleaned = re.sub(r'<customFilter[^>]*/>', '', cleaned)
+                    content = cleaned.encode("utf-8")
+                zout.writestr(item, content)
+        return out_buf.getvalue()
+    except Exception:
+        return file_bytes
+
+
+def robust_load_workbook(file_bytes: bytes, data_only: bool = True) -> openpyxl.Workbook:
+    """
+    Loads openpyxl Workbook with autoFilter descriptor patch and fallback XML cleaner.
+    """
+    patch_openpyxl_filters()
+    try:
+        return openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=data_only)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if any(k in err_msg for k in ["wildcard", "customfilter", "filter", "descriptor"]):
+            cleaned = clean_excel_filters_xml(file_bytes)
+            return openpyxl.load_workbook(io.BytesIO(cleaned), data_only=data_only)
+        raise
+
 
 from backend.schemas.canonical_models import (
     StudentRecord,
@@ -192,7 +276,7 @@ class ExamCellParserAdapter:
         self.warnings: List[str] = []
 
     def parse(self) -> List[StudentRecord]:
-        wb = openpyxl.load_workbook(io.BytesIO(self.file_content), data_only=True)
+        wb = robust_load_workbook(self.file_content, data_only=True)
         if self.sheet_name and self.sheet_name in wb.sheetnames:
             ws = wb[self.sheet_name]
         else:
@@ -500,11 +584,11 @@ class ExamCellParserAdapter:
                     col_map["ANAT_PHYS"]["ex_part_a"] = c
                 elif ("phys" in s_val or "38" in s_val or "part b" in s_val) and "ex_part_b" not in col_map["ANAT_PHYS"]:
                     col_map["ANAT_PHYS"]["ex_part_b"] = c
-                elif ("ex. total" in s_val or "75" in s_val) and "ex_total" not in col_map["ANAT_PHYS"]:
+                elif ("ex. total" in s_val or ("75" in s_val and "100" not in s_val)) and "ex_total" not in col_map["ANAT_PHYS"]:
                     col_map["ANAT_PHYS"]["ex_total"] = c
                 elif "grace" in s_val and "grace" not in col_map["ANAT_PHYS"]:
                     col_map["ANAT_PHYS"]["grace"] = c
-                elif ("course total" in s_val or "100" in s_val) and "total" not in col_map["ANAT_PHYS"]:
+                elif ("course total" in s_val or "100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["ANAT_PHYS"]:
                     col_map["ANAT_PHYS"]["total"] = c
 
             elif current_course == "SOCI_PSYC":
@@ -514,11 +598,11 @@ class ExamCellParserAdapter:
                     col_map["SOCI_PSYC"]["ex_part_a"] = c
                 elif ("psyc" in s_val or "38" in s_val or "part b" in s_val) and "ex_part_b" not in col_map["SOCI_PSYC"]:
                     col_map["SOCI_PSYC"]["ex_part_b"] = c
-                elif ("ex. total" in s_val or "75" in s_val) and "ex_total" not in col_map["SOCI_PSYC"]:
+                elif ("ex. total" in s_val or ("75" in s_val and "100" not in s_val)) and "ex_total" not in col_map["SOCI_PSYC"]:
                     col_map["SOCI_PSYC"]["ex_total"] = c
                 elif "grace" in s_val and "grace" not in col_map["SOCI_PSYC"]:
                     col_map["SOCI_PSYC"]["grace"] = c
-                elif ("course total" in s_val or "100" in s_val) and "total" not in col_map["SOCI_PSYC"]:
+                elif ("course total" in s_val or "100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["SOCI_PSYC"]:
                     col_map["SOCI_PSYC"]["total"] = c
 
             elif current_course == "ENGL":
@@ -528,6 +612,30 @@ class ExamCellParserAdapter:
                     col_map["ENGL"]["ex"] = c
                 elif ("total" in s_val or "50" in s_val) and "total" not in col_map["ENGL"]:
                     col_map["ENGL"]["total"] = c
+
+        # Deterministic fallbacks matching SGPGIMS Sem 1 layout
+        ap = col_map["ANAT_PHYS"]
+        if "int" not in ap: ap["int"] = 6
+        if "ex_part_a" not in ap: ap["ex_part_a"] = 7
+        if "ex_part_b" not in ap: ap["ex_part_b"] = 8
+        if "ex_total" not in ap: ap["ex_total"] = 9
+        if "total" not in ap: ap["total"] = 10
+        if ap.get("total") and ap.get("ex_total") and ap["total"] == ap["ex_total"]:
+            ap["total"] = ap["ex_total"] + 1
+
+        sp = col_map["SOCI_PSYC"]
+        if "int" not in sp: sp["int"] = 13
+        if "ex_part_a" not in sp: sp["ex_part_a"] = 14
+        if "ex_part_b" not in sp: sp["ex_part_b"] = 15
+        if "ex_total" not in sp: sp["ex_total"] = 16
+        if "total" not in sp: sp["total"] = 17
+        if sp.get("total") and sp.get("ex_total") and sp["total"] == sp["ex_total"]:
+            sp["total"] = sp["ex_total"] + 1
+
+        en = col_map["ENGL"]
+        if "int" not in en: en["int"] = 20
+        if "ex" not in en: en["ex"] = 21
+        if "total" not in en: en["total"] = 22
 
         return col_map
 
@@ -566,11 +674,11 @@ class ExamCellParserAdapter:
                     col_map["NNF_PRACT"]["total"] = c
 
             elif "n-nf" in combined or "nursing foundation" in combined:
-                if "int" in s_val and "int" not in col_map["NNF_THEORY"]:
+                if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["NNF_THEORY"]:
                     col_map["NNF_THEORY"]["int"] = c
-                elif ("ex" in s_val or "75" in s_val) and "ex" not in col_map["NNF_THEORY"]:
+                elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["NNF_THEORY"]:
                     col_map["NNF_THEORY"]["ex"] = c
-                elif "total" in s_val and "total" not in col_map["NNF_THEORY"]:
+                elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["NNF_THEORY"]:
                     col_map["NNF_THEORY"]["total"] = c
 
             elif "hnit" in combined or "informatics" in combined or "technology" in combined:
@@ -588,11 +696,15 @@ class ExamCellParserAdapter:
         if "nutr_ex" not in bn: bn["nutr_ex"] = 8
         if "ex_total" not in bn: bn["ex_total"] = 9
         if "total" not in bn: bn["total"] = 10
+        if bn.get("total") and bn.get("ex_total") and bn["total"] == bn["ex_total"]:
+            bn["total"] = bn["ex_total"] + 1
 
         nt = col_map["NNF_THEORY"]
         if "int" not in nt: nt["int"] = 13
         if "ex" not in nt: nt["ex"] = 14
         if "total" not in nt: nt["total"] = 15
+        if nt.get("total") and nt.get("ex") and nt["total"] == nt["ex"]:
+            nt["total"] = nt["ex"] + 1
 
         np_ = col_map["NNF_PRACT"]
         if "int" not in np_: np_["int"] = 18
@@ -648,20 +760,27 @@ class ExamCellParserAdapter:
         v_pa = format_numeric_token(tot_pa if not ab_pa else "Ab")
         v_pb = format_numeric_token(tot_pb if not ab_pb else "Ab")
 
-        if tot_extot is not None:
-            v_extot = tot_extot
-        elif isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
-            v_extot = v_pa + v_pb
+        if isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
+            v_extot = round(float(v_pa) + float(v_pb), 2)
+        elif raw_extot is not None:
+            v_extot = raw_extot
+        elif tot_extot is not None:
+            v_extot = round(tot_extot - anat_grace, 2) if anat_grace > 0 else tot_extot
+        elif v_pa == "Ab" and v_pb == "Ab":
+            v_extot = "Ab"
         else:
             v_extot = 0
 
-        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
-        if anat_grace > 0 and tot_final is not None:
-            v_total = tot_final
-        elif isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
-            v_total = round(v_int + v_extot + anat_grace, 2)
-        elif tot_final is not None:
-            v_total = tot_final
+        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+        if isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
+            v_total = round(float(v_int) + float(v_extot) + float(anat_grace), 2)
+        elif v_int == "Ab" and v_extot == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int) + (float(v_extot) if isinstance(v_extot, (int, float)) else 0.0) + float(anat_grace), 2)
+        elif isinstance(v_extot, (int, float)):
+            v_total = round(float(v_extot) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(anat_grace), 2)
         else:
             v_total = 0
 
@@ -671,7 +790,8 @@ class ExamCellParserAdapter:
             "ex_part_b": v_pb,
             "ex_total": format_numeric_token(v_extot),
             "grace": format_numeric_token(anat_grace),
-            "total": format_numeric_token(v_total)
+            "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # 2. SOCI_PSYC
@@ -705,19 +825,26 @@ class ExamCellParserAdapter:
         v_pb = format_numeric_token(tot_pb if not ab_pb else "Ab")
 
         if isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
-            v_extot = v_pa + v_pb
+            v_extot = round(float(v_pa) + float(v_pb), 2)
         elif raw_extot is not None:
             v_extot = raw_extot
         elif tot_extot is not None:
             v_extot = round(tot_extot - soci_grace, 2) if soci_grace > 0 else tot_extot
+        elif v_pa == "Ab" and v_pb == "Ab":
+            v_extot = "Ab"
         else:
             v_extot = 0
 
-        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
         if isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
-            v_total = round(v_int + v_extot + soci_grace, 2)
-        elif tot_final is not None:
-            v_total = tot_final
+            v_total = round(float(v_int) + float(v_extot) + float(soci_grace), 2)
+        elif v_int == "Ab" and v_extot == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int) + (float(v_extot) if isinstance(v_extot, (int, float)) else 0.0) + float(soci_grace), 2)
+        elif isinstance(v_extot, (int, float)):
+            v_total = round(float(v_extot) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(soci_grace), 2)
         else:
             v_total = 0
 
@@ -727,7 +854,8 @@ class ExamCellParserAdapter:
             "ex_part_b": v_pb,
             "ex_total": format_numeric_token(v_extot),
             "grace": format_numeric_token(soci_grace),
-            "total": format_numeric_token(v_total)
+            "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # 3. ENGL
@@ -738,22 +866,28 @@ class ExamCellParserAdapter:
 
         raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
         raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
 
         v_int = format_numeric_token(tot_int if not ab_int else "Ab")
         v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
 
-        if tot_final is not None:
-            v_total = tot_final
-        elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-            v_total = round(v_int + v_ex, 2)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA)
+        if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+            v_total = round(float(v_int) + float(v_ex), 2)
+        elif v_int == "Ab" and v_ex == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int), 2)
+        elif isinstance(v_ex, (int, float)):
+            v_total = round(float(v_ex), 2)
         else:
             v_total = 0
 
         courses["ENGL"] = {
             "int_marks": v_int,
             "ex_marks": v_ex,
-            "total": format_numeric_token(v_total)
+            "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # Check if grace was extracted to enrich remarks
@@ -802,18 +936,25 @@ class ExamCellParserAdapter:
         v_pb = format_numeric_token(tot_pb if not ab_pb else "Ab")
 
         if isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
-            v_extot = v_pa + v_pb
+            v_extot = round(float(v_pa) + float(v_pb), 2)
         elif raw_extot is not None:
             v_extot = raw_extot
         elif tot_extot is not None:
             v_extot = round(tot_extot - bioc_grace, 2) if bioc_grace > 0 else tot_extot
+        elif v_pa == "Ab" and v_pb == "Ab":
+            v_extot = "Ab"
         else:
             v_extot = 0
 
-        if tot_final is not None:
-            v_total = tot_final
-        elif isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
-            v_total = round(v_int + v_extot, 2)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+        if isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
+            v_total = round(float(v_int) + float(v_extot) + float(bioc_grace), 2)
+        elif v_int == "Ab" and v_extot == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int) + (float(v_extot) if isinstance(v_extot, (int, float)) else 0.0) + float(bioc_grace), 2)
+        elif isinstance(v_extot, (int, float)):
+            v_total = round(float(v_extot) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(bioc_grace), 2)
         else:
             v_total = 0
 
@@ -824,6 +965,7 @@ class ExamCellParserAdapter:
             "ex_total": format_numeric_token(v_extot),
             "grace": format_numeric_token(bioc_grace),
             "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # 2. NNF_THEORY
@@ -834,16 +976,21 @@ class ExamCellParserAdapter:
 
         raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
         raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
 
         nnf_t_grace = g_int + g_ex + g_tot
         v_int = format_numeric_token(tot_int if not ab_int else "Ab")
         v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
 
-        if tot_final is not None:
-            v_total = tot_final
-        elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-            v_total = round(v_int + v_ex, 2)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+        if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+            v_total = round(float(v_int) + float(v_ex) + float(nnf_t_grace), 2)
+        elif v_int == "Ab" and v_ex == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(nnf_t_grace), 2)
+        elif isinstance(v_ex, (int, float)):
+            v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(nnf_t_grace), 2)
         else:
             v_total = 0
 
@@ -852,6 +999,7 @@ class ExamCellParserAdapter:
             "ex_marks": v_ex,
             "grace": format_numeric_token(nnf_t_grace),
             "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # 3. NNF_PRACT
@@ -862,16 +1010,21 @@ class ExamCellParserAdapter:
 
         raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
         raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
 
         nnf_p_grace = g_int + g_ex + g_tot
         v_int = format_numeric_token(tot_int if not ab_int else "Ab")
         v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
 
-        if tot_final is not None:
-            v_total = tot_final
-        elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-            v_total = round(v_int + v_ex, 2)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+        if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+            v_total = round(float(v_int) + float(v_ex) + float(nnf_p_grace), 2)
+        elif v_int == "Ab" and v_ex == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(nnf_p_grace), 2)
+        elif isinstance(v_ex, (int, float)):
+            v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(nnf_p_grace), 2)
         else:
             v_total = 0
 
@@ -880,6 +1033,7 @@ class ExamCellParserAdapter:
             "ex_marks": v_ex,
             "grace": format_numeric_token(nnf_p_grace),
             "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # 4. HNIT
@@ -890,16 +1044,21 @@ class ExamCellParserAdapter:
 
         raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
         raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+        raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
 
         hnit_grace = g_int + g_ex + g_tot
         v_int = format_numeric_token(tot_int if not ab_int else "Ab")
         v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
 
-        if tot_final is not None:
-            v_total = tot_final
-        elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-            v_total = round(v_int + v_ex, 2)
+        # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+        if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+            v_total = round(float(v_int) + float(v_ex) + float(hnit_grace), 2)
+        elif v_int == "Ab" and v_ex == "Ab":
+            v_total = "Ab"
+        elif isinstance(v_int, (int, float)):
+            v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(hnit_grace), 2)
+        elif isinstance(v_ex, (int, float)):
+            v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(hnit_grace), 2)
         else:
             v_total = 0
 
@@ -908,6 +1067,7 @@ class ExamCellParserAdapter:
             "ex_marks": v_ex,
             "grace": format_numeric_token(hnit_grace),
             "total": format_numeric_token(v_total),
+            "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
         }
 
         # Grace enrichment
@@ -941,15 +1101,15 @@ class ExamCellParserAdapter:
             combined = f"{p_val} {s_val}"
 
             if "micr" in combined or "micro" in combined:
-                if ("int" in s_val or "25" in s_val and "micr" not in s_val) and "int" not in col_map["MICR"]:
+                if ("int" in s_val or ("25" in s_val and "micr" not in s_val and "ex" not in s_val)) and "int" not in col_map["MICR"]:
                     col_map["MICR"]["int"] = c
                 elif ("micr" in s_val or "37" in s_val) and "ex_part_a" not in col_map["MICR"]:
                     col_map["MICR"]["ex_part_a"] = c
                 elif ("infc" in s_val or "38" in s_val) and "ex_part_b" not in col_map["MICR"]:
                     col_map["MICR"]["ex_part_b"] = c
-                elif ("75" in s_val or "ex. total" in s_val) and "ex_total" not in col_map["MICR"]:
+                elif ("75" in s_val or "ex. total" in s_val) and "100" not in s_val and "ex_total" not in col_map["MICR"]:
                     col_map["MICR"]["ex_total"] = c
-                elif ("100" in s_val or "total" in s_val) and "total" not in col_map["MICR"]:
+                elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["MICR"]:
                     col_map["MICR"]["total"] = c
             elif "ahn" in combined or "adult" in combined:
                 if "pract" in combined:
@@ -957,14 +1117,17 @@ class ExamCellParserAdapter:
                         col_map["AHN_I_PRACT"]["int"] = c
                     elif "ex" in s_val and "ex" not in col_map["AHN_I_PRACT"]:
                         col_map["AHN_I_PRACT"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["AHN_I_PRACT"]:
+                    elif ("100" in s_val or ("total" in s_val and "50" not in s_val)) and "total" not in col_map["AHN_I_PRACT"]:
                         col_map["AHN_I_PRACT"]["total"] = c
                 else:
-                    if "int" in s_val and "int" not in col_map["AHN_I_THEORY"]:
+                    # Adult Health Nursing - I (Theory): Int (25), Total (75) / Ex. (75), Total (100)
+                    if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["AHN_I_THEORY"]:
                         col_map["AHN_I_THEORY"]["int"] = c
-                    elif "ex" in s_val and "ex" not in col_map["AHN_I_THEORY"]:
+                    elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["AHN_I_THEORY"]:
+                        # Explicitly bind external university exam out of 75 (Header: 'Total (75)' or 'Ex. (75)')
                         col_map["AHN_I_THEORY"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["AHN_I_THEORY"]:
+                    elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["AHN_I_THEORY"]:
+                        # Explicitly bind combined course total out of 100 (Header: 'Total (100)')
                         col_map["AHN_I_THEORY"]["total"] = c
 
         m = col_map["MICR"]
@@ -973,16 +1136,38 @@ class ExamCellParserAdapter:
         if "ex_part_b" not in m: m["ex_part_b"] = 8
         if "ex_total" not in m: m["ex_total"] = 9
         if "total" not in m: m["total"] = 10
+        if m.get("total") and m.get("ex_total") and m["total"] == m["ex_total"]:
+            m["total"] = m["ex_total"] + 1
 
         at = col_map["AHN_I_THEORY"]
         if "int" not in at: at["int"] = 13
         if "ex" not in at: at["ex"] = 14
         if "total" not in at: at["total"] = 15
 
+        # CRITICAL SAFETY GATE: Total (75) must NEVER be mapped to total when Total (100) exists
+        if at.get("total") and at.get("ex") and at["total"] == at["ex"]:
+            at["total"] = at["ex"] + 1
+
+        if at.get("total") and at["total"] <= ws.max_column:
+            t_hdr = clean_text_string(ws.cell(sub_row, at["total"]).value).lower()
+            if "75" in t_hdr:
+                at["ex"] = at["total"]
+                found_100 = False
+                for c_cand in range(at["ex"] + 1, min(at["ex"] + 4, ws.max_column + 1)):
+                    c_hdr = clean_text_string(ws.cell(sub_row, c_cand).value).lower()
+                    if "100" in c_hdr or "total" in c_hdr:
+                        at["total"] = c_cand
+                        found_100 = True
+                        break
+                if not found_100:
+                    at["total"] = at["ex"] + 1
+
         ap = col_map["AHN_I_PRACT"]
         if "int" not in ap: ap["int"] = 18
         if "ex" not in ap: ap["ex"] = 19
         if "total" not in ap: ap["total"] = 20
+        if ap.get("total") and ap.get("ex") and ap["total"] == ap["ex"]:
+            ap["total"] = ap["ex"] + 1
 
         return col_map
 
@@ -1028,16 +1213,26 @@ class ExamCellParserAdapter:
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_pa = format_numeric_token(tot_pa if not ab_pa else "Ab")
             v_pb = format_numeric_token(tot_pb if not ab_pb else "Ab")
-            if tot_extot is not None:
-                v_extot = tot_extot
-            elif isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
-                v_extot = v_pa + v_pb
+            if isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
+                v_extot = round(float(v_pa) + float(v_pb), 2)
+            elif raw_extot is not None:
+                v_extot = raw_extot
+            elif tot_extot is not None:
+                v_extot = round(tot_extot - m_grace, 2) if m_grace > 0 else tot_extot
+            elif v_pa == "Ab" and v_pb == "Ab":
+                v_extot = "Ab"
             else:
                 v_extot = 0
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
-                v_total = round(v_int + v_extot, 2)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
+                v_total = round(float(v_int) + float(v_extot) + float(m_grace), 2)
+            elif v_int == "Ab" and v_extot == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_extot) if isinstance(v_extot, (int, float)) else 0.0) + float(m_grace), 2)
+            elif isinstance(v_extot, (int, float)):
+                v_total = round(float(v_extot) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(m_grace), 2)
             else:
                 v_total = 0
 
@@ -1048,6 +1243,7 @@ class ExamCellParserAdapter:
                 "ex_total": format_numeric_token(v_extot),
                 "grace": format_numeric_token(m_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 2. AHN_I_THEORY
@@ -1069,14 +1265,23 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             at_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
-            v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-                v_total = round(v_int + v_ex, 2)
+            if raw_ex is not None and g_ex > 0:
+                v_ex = format_numeric_token(raw_ex)
+            else:
+                v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(at_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(at_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(at_grace), 2)
             else:
                 v_total = 0
 
@@ -1085,6 +1290,7 @@ class ExamCellParserAdapter:
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(at_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 3. AHN_I_PRACT
@@ -1106,14 +1312,23 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             ap_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
-            v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-                v_total = round(v_int + v_ex, 2)
+            if raw_ex is not None and g_ex > 0:
+                v_ex = format_numeric_token(raw_ex)
+            else:
+                v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ap_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ap_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ap_grace), 2)
             else:
                 v_total = 0
 
@@ -1122,6 +1337,7 @@ class ExamCellParserAdapter:
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ap_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         return courses, raw_remarks
@@ -1140,17 +1356,17 @@ class ExamCellParserAdapter:
             combined = f"{p_val} {s_val}"
 
             if "phar" in combined or "path" in combined:
-                if ("int" in s_val or "25" in s_val and "phar" not in s_val) and "int" not in col_map["PHAR_PATH"]:
+                if ("int" in s_val or ("25" in s_val and "phar" not in s_val and "ex" not in s_val)) and "int" not in col_map["PHAR_PATH"]:
                     col_map["PHAR_PATH"]["int"] = c
                 elif ("phar" in s_val or "38" in s_val) and "ex_part_a" not in col_map["PHAR_PATH"]:
                     col_map["PHAR_PATH"]["ex_part_a"] = c
-                elif ("path" in s_val or "25" in s_val and "path" in s_val) and "ex_part_b" not in col_map["PHAR_PATH"]:
+                elif ("path" in s_val or ("25" in s_val and "path" in s_val)) and "ex_part_b" not in col_map["PHAR_PATH"]:
                     col_map["PHAR_PATH"]["ex_part_b"] = c
                 elif ("gen" in s_val or "12" in s_val) and "ex_part_c" not in col_map["PHAR_PATH"]:
                     col_map["PHAR_PATH"]["ex_part_c"] = c
-                elif ("75" in s_val or "ex. total" in s_val) and "ex_total" not in col_map["PHAR_PATH"]:
+                elif ("75" in s_val or "ex. total" in s_val) and "100" not in s_val and "ex_total" not in col_map["PHAR_PATH"]:
                     col_map["PHAR_PATH"]["ex_total"] = c
-                elif ("100" in s_val or "total" in s_val) and "total" not in col_map["PHAR_PATH"]:
+                elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["PHAR_PATH"]:
                     col_map["PHAR_PATH"]["total"] = c
             elif "ahn" in combined or "adult" in combined:
                 if "pract" in combined:
@@ -1158,21 +1374,21 @@ class ExamCellParserAdapter:
                         col_map["AHN_II_PRACT"]["int"] = c
                     elif "ex" in s_val and "ex" not in col_map["AHN_II_PRACT"]:
                         col_map["AHN_II_PRACT"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["AHN_II_PRACT"]:
+                    elif ("100" in s_val or ("total" in s_val and "50" not in s_val)) and "total" not in col_map["AHN_II_PRACT"]:
                         col_map["AHN_II_PRACT"]["total"] = c
                 else:
-                    if "int" in s_val and "int" not in col_map["AHN_II_THEORY"]:
+                    if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["AHN_II_THEORY"]:
                         col_map["AHN_II_THEORY"]["int"] = c
-                    elif "ex" in s_val and "ex" not in col_map["AHN_II_THEORY"]:
+                    elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["AHN_II_THEORY"]:
                         col_map["AHN_II_THEORY"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["AHN_II_THEORY"]:
+                    elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["AHN_II_THEORY"]:
                         col_map["AHN_II_THEORY"]["total"] = c
             elif "prof" in combined or "ethics" in combined or "values" in combined:
                 if "int" in s_val and "int" not in col_map["PROF"]:
                     col_map["PROF"]["int"] = c
                 elif "ex" in s_val and "ex" not in col_map["PROF"]:
                     col_map["PROF"]["ex"] = c
-                elif "total" in s_val and "total" not in col_map["PROF"]:
+                elif ("total" in s_val or "50" in s_val) and "total" not in col_map["PROF"]:
                     col_map["PROF"]["total"] = c
 
         pp = col_map["PHAR_PATH"]
@@ -1182,11 +1398,15 @@ class ExamCellParserAdapter:
         if "ex_part_c" not in pp: pp["ex_part_c"] = 9
         if "ex_total" not in pp: pp["ex_total"] = 10
         if "total" not in pp: pp["total"] = 11
+        if pp.get("total") and pp.get("ex_total") and pp["total"] == pp["ex_total"]:
+            pp["total"] = pp["ex_total"] + 1
 
         at = col_map["AHN_II_THEORY"]
         if "int" not in at: at["int"] = 14
         if "ex" not in at: at["ex"] = 15
         if "total" not in at: at["total"] = 16
+        if at.get("total") and at.get("ex") and at["total"] == at["ex"]:
+            at["total"] = at["ex"] + 1
 
         ap = col_map["AHN_II_PRACT"]
         if "int" not in ap: ap["int"] = 19
@@ -1250,14 +1470,26 @@ class ExamCellParserAdapter:
                 v_extot = raw_extot
             elif tot_extot is not None:
                 v_extot = tot_extot
-            elif isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)) and isinstance(v_pc, (int, float)):
-                v_extot = v_pa + v_pb + v_pc
+            if isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)) and isinstance(v_pc, (int, float)):
+                v_extot = round(float(v_pa) + float(v_pb) + float(v_pc), 2)
+            elif raw_extot is not None:
+                v_extot = raw_extot
+            elif tot_extot is not None:
+                v_extot = round(tot_extot - pp_grace, 2) if pp_grace > 0 else tot_extot
+            elif v_pa == "Ab" and v_pb == "Ab" and v_pc == "Ab":
+                v_extot = "Ab"
             else:
                 v_extot = 0
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
-                v_total = round(v_int + v_extot, 2)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_extot, (int, float)):
+                v_total = round(float(v_int) + float(v_extot) + float(pp_grace), 2)
+            elif v_int == "Ab" and v_extot == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_extot) if isinstance(v_extot, (int, float)) else 0.0) + float(pp_grace), 2)
+            elif isinstance(v_extot, (int, float)):
+                v_total = round(float(v_extot) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(pp_grace), 2)
             else:
                 v_total = 0
 
@@ -1269,6 +1501,7 @@ class ExamCellParserAdapter:
                 "ex_total": format_numeric_token(v_extot),
                 "grace": format_numeric_token(pp_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 2. AHN_II_THEORY
@@ -1290,17 +1523,23 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             at_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             if raw_ex is not None and g_ex > 0:
                 v_ex = format_numeric_token(raw_ex)
             else:
                 v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-                v_total = round(v_int + v_ex, 2)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(at_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(at_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(at_grace), 2)
             else:
                 v_total = 0
 
@@ -1309,6 +1548,7 @@ class ExamCellParserAdapter:
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(at_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 3. AHN_II_PRACT
@@ -1330,17 +1570,23 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             ap_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             if raw_ex is not None and g_ex > 0:
                 v_ex = format_numeric_token(raw_ex)
             else:
                 v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-                v_total = round(v_int + v_ex, 2)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ap_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ap_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ap_grace), 2)
             else:
                 v_total = 0
 
@@ -1349,6 +1595,7 @@ class ExamCellParserAdapter:
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ap_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 4. PROF
@@ -1370,17 +1617,23 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             pr_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             if raw_ex is not None and g_ex > 0:
                 v_ex = format_numeric_token(raw_ex)
             else:
                 v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            if tot_final is not None:
-                v_total = tot_final
-            elif isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
-                v_total = round(v_int + v_ex, 2)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(pr_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(pr_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(pr_grace), 2)
             else:
                 v_total = 0
 
@@ -1389,6 +1642,7 @@ class ExamCellParserAdapter:
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(pr_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         return courses, raw_remarks
@@ -1412,39 +1666,43 @@ class ExamCellParserAdapter:
                         col_map["COMH_I_PRACT"]["int"] = c
                     elif "ex" in s_val and "ex" not in col_map["COMH_I_PRACT"]:
                         col_map["COMH_I_PRACT"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["COMH_I_PRACT"]:
+                    elif ("total" in s_val or "100" in s_val) and "total" not in col_map["COMH_I_PRACT"]:
                         col_map["COMH_I_PRACT"]["total"] = c
                 else:
-                    if "int" in s_val and "int" not in col_map["COMH_I_THEORY"]:
+                    if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["COMH_I_THEORY"]:
                         col_map["COMH_I_THEORY"]["int"] = c
-                    elif "ex" in s_val and "ex" not in col_map["COMH_I_THEORY"]:
+                    elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["COMH_I_THEORY"]:
                         col_map["COMH_I_THEORY"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["COMH_I_THEORY"]:
+                    elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["COMH_I_THEORY"]:
                         col_map["COMH_I_THEORY"]["total"] = c
             elif "educ" in combined or "education" in combined:
-                if "int" in s_val and "int" not in col_map["EDUC"]:
+                if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["EDUC"]:
                     col_map["EDUC"]["int"] = c
-                elif "ex" in s_val and "ex" not in col_map["EDUC"]:
+                elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["EDUC"]:
                     col_map["EDUC"]["ex"] = c
-                elif "total" in s_val and "total" not in col_map["EDUC"]:
+                elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["EDUC"]:
                     col_map["EDUC"]["total"] = c
             elif "forn" in combined or "forensic" in combined:
                 if "int" in s_val and "int" not in col_map["FORN"]:
                     col_map["FORN"]["int"] = c
                 elif "ex" in s_val and "ex" not in col_map["FORN"]:
                     col_map["FORN"]["ex"] = c
-                elif "total" in s_val and "total" not in col_map["FORN"]:
+                elif ("total" in s_val or "50" in s_val) and "total" not in col_map["FORN"]:
                     col_map["FORN"]["total"] = c
 
         ct = col_map["COMH_I_THEORY"]
         if "int" not in ct: ct["int"] = 6
         if "ex" not in ct: ct["ex"] = 7
         if "total" not in ct: ct["total"] = 8
+        if ct.get("total") and ct.get("ex") and ct["total"] == ct["ex"]:
+            ct["total"] = ct["ex"] + 1
 
         ed = col_map["EDUC"]
         if "int" not in ed: ed["int"] = 11
         if "ex" not in ed: ed["ex"] = 12
         if "total" not in ed: ed["total"] = 13
+        if ed.get("total") and ed.get("ex") and ed["total"] == ed["ex"]:
+            ed["total"] = ed["ex"] + 1
 
         fn = col_map["FORN"]
         if "int" not in fn: fn["int"] = 16
@@ -1492,13 +1750,24 @@ class ExamCellParserAdapter:
             ct_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ct_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ct_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ct_grace), 2)
+            else:
+                v_total = 0
 
             courses["COMH_I_THEORY"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ct_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 2. EDUC
@@ -1520,17 +1789,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             ed_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ed_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ed_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ed_grace), 2)
+            else:
+                v_total = 0
 
             courses["EDUC"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ed_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 3. FORN
@@ -1552,17 +1833,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             fn_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(fn_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(fn_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(fn_grace), 2)
+            else:
+                v_total = 0
 
             courses["FORN"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(fn_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 4. COMH_I_PRACT
@@ -1584,17 +1877,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             cp_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(cp_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(cp_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(cp_grace), 2)
+            else:
+                v_total = 0
 
             courses["COMH_I_PRACT"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(cp_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         return courses, raw_remarks
@@ -1619,14 +1924,14 @@ class ExamCellParserAdapter:
                         col_map["CHN_PRACT"]["int"] = c
                     elif "ex" in s_val and "ex" not in col_map["CHN_PRACT"]:
                         col_map["CHN_PRACT"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["CHN_PRACT"]:
+                    elif ("total" in s_val or "100" in s_val) and "total" not in col_map["CHN_PRACT"]:
                         col_map["CHN_PRACT"]["total"] = c
                 else:
-                    if "int" in s_val and "int" not in col_map["CHN_THEORY"]:
+                    if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["CHN_THEORY"]:
                         col_map["CHN_THEORY"]["int"] = c
-                    elif "ex" in s_val and "ex" not in col_map["CHN_THEORY"]:
+                    elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["CHN_THEORY"]:
                         col_map["CHN_THEORY"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["CHN_THEORY"]:
+                    elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["CHN_THEORY"]:
                         col_map["CHN_THEORY"]["total"] = c
             elif "mhn" in combined or "mental health" in combined:
                 if "pract" in combined:
@@ -1634,37 +1939,43 @@ class ExamCellParserAdapter:
                         col_map["MHN_PRACT"]["int"] = c
                     elif "ex" in s_val and "ex" not in col_map["MHN_PRACT"]:
                         col_map["MHN_PRACT"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["MHN_PRACT"]:
+                    elif ("total" in s_val or "100" in s_val) and "total" not in col_map["MHN_PRACT"]:
                         col_map["MHN_PRACT"]["total"] = c
                 else:
-                    if "int" in s_val and "int" not in col_map["MHN_THEORY"]:
+                    if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["MHN_THEORY"]:
                         col_map["MHN_THEORY"]["int"] = c
-                    elif "ex" in s_val and "ex" not in col_map["MHN_THEORY"]:
+                    elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["MHN_THEORY"]:
                         col_map["MHN_THEORY"]["ex"] = c
-                    elif "total" in s_val and "total" not in col_map["MHN_THEORY"]:
+                    elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["MHN_THEORY"]:
                         col_map["MHN_THEORY"]["total"] = c
             elif "nmle" in combined or "leadership" in combined or "management" in combined:
-                if "int" in s_val and "int" not in col_map["NMLE"]:
+                if ("int" in s_val or ("25" in s_val and "ex" not in s_val)) and "int" not in col_map["NMLE"]:
                     col_map["NMLE"]["int"] = c
-                elif "ex" in s_val and "ex" not in col_map["NMLE"]:
+                elif ("ex" in s_val or "75" in s_val) and "100" not in s_val and "ex" not in col_map["NMLE"]:
                     col_map["NMLE"]["ex"] = c
-                elif "total" in s_val and "total" not in col_map["NMLE"]:
+                elif ("100" in s_val or ("total" in s_val and "75" not in s_val and "ex" not in s_val)) and "total" not in col_map["NMLE"]:
                     col_map["NMLE"]["total"] = c
 
         ct = col_map["CHN_THEORY"]
         if "int" not in ct: ct["int"] = 6
         if "ex" not in ct: ct["ex"] = 7
         if "total" not in ct: ct["total"] = 8
+        if ct.get("total") and ct.get("ex") and ct["total"] == ct["ex"]:
+            ct["total"] = ct["ex"] + 1
 
         mt = col_map["MHN_THEORY"]
         if "int" not in mt: mt["int"] = 11
         if "ex" not in mt: mt["ex"] = 12
         if "total" not in mt: mt["total"] = 13
+        if mt.get("total") and mt.get("ex") and mt["total"] == mt["ex"]:
+            mt["total"] = mt["ex"] + 1
 
         nl = col_map["NMLE"]
         if "int" not in nl: nl["int"] = 16
         if "ex" not in nl: nl["ex"] = 17
         if "total" not in nl: nl["total"] = 18
+        if nl.get("total") and nl.get("ex") and nl["total"] == nl["ex"]:
+            nl["total"] = nl["ex"] + 1
 
         cp = col_map["CHN_PRACT"]
         if "int" not in cp: cp["int"] = 21
@@ -1712,13 +2023,24 @@ class ExamCellParserAdapter:
             ct_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ct_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ct_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ct_grace), 2)
+            else:
+                v_total = 0
 
             courses["CHN_THEORY"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ct_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 2. MHN_THEORY
@@ -1740,17 +2062,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             mt_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(mt_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(mt_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(mt_grace), 2)
+            else:
+                v_total = 0
 
             courses["MHN_THEORY"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(mt_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 3. NMLE
@@ -1772,17 +2106,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             nl_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(nl_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(nl_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(nl_grace), 2)
+            else:
+                v_total = 0
 
             courses["NMLE"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(nl_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 4. CHN_PRACT
@@ -1804,17 +2150,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             cp_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(cp_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(cp_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(cp_grace), 2)
+            else:
+                v_total = 0
 
             courses["CHN_PRACT"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(cp_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 5. MHN_PRACT
@@ -1836,17 +2194,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             mp_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(tot_int if not ab_int else "Ab")
             v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(mp_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(mp_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(mp_grace), 2)
+            else:
+                v_total = 0
 
             courses["MHN_PRACT"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(mp_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         return courses, raw_remarks
@@ -1863,11 +2233,13 @@ class ExamCellParserAdapter:
         for c in range(1, ws.max_column + 1):
             p_val = clean_text_string(ws.cell(course_row, c).value).lower()
             s_val = clean_text_string(ws.cell(sub_row, c).value).lower()
+            if any(k in s_val for k in ["letter grade", "grade point", "gp", "sgpa", "percentage", "%", "remark", "result"]):
+                continue
             combined = f"{p_val} {s_val}"
 
             is_int = bool(re.search(r'\bint\b|\bint\.', s_val) or s_val.startswith("int"))
-            is_ex = bool(re.search(r'\bex\b|\bex\.', s_val) or s_val.startswith("ex") or "mid ex" in s_val or "comh (i)" in s_val or "comh (ii)" in s_val)
-            is_tot = bool("total" in s_val or "grand total" in s_val)
+            is_ex = bool(re.search(r'\bex\b|\bex\.', s_val) or s_val.startswith("ex") or "mid ex" in s_val or "comh (i)" in s_val or "comh (ii)" in s_val or ("75" in s_val and "100" not in s_val))
+            is_tot = bool(("total" in s_val or "grand total" in s_val or "100" in s_val) and "75" not in s_val and "ex" not in s_val)
 
             if "comh" in combined or "community" in combined:
                 if "pract" in combined:
@@ -1880,8 +2252,8 @@ class ExamCellParserAdapter:
                     elif is_tot and "total" not in col_map["COMH_II_THEORY"]: col_map["COMH_II_THEORY"]["total"] = c
             elif "nrst" in combined or "research" in combined or "statist" in combined:
                 if is_int and "int" not in col_map["NRST"]: col_map["NRST"]["int"] = c
-                elif ("nur" in s_val or "part a" in s_val) and "part_a" not in col_map["NRST"]: col_map["NRST"]["part_a"] = c
-                elif ("stat" in s_val or "part b" in s_val) and "part_b" not in col_map["NRST"]: col_map["NRST"]["part_b"] = c
+                elif ("nur" in s_val or "55" in s_val or "part a" in s_val) and "part_a" not in col_map["NRST"]: col_map["NRST"]["part_a"] = c
+                elif ("stat" in s_val or "20" in s_val or "part b" in s_val) and "part_b" not in col_map["NRST"]: col_map["NRST"]["part_b"] = c
                 elif is_ex and "ex" not in col_map["NRST"]: col_map["NRST"]["ex"] = c
                 elif is_tot and "total" not in col_map["NRST"]: col_map["NRST"]["total"] = c
             elif "midw" in combined or "obgn" in combined or "obg" in combined or "obstetrical" in combined or "gynecology" in combined:
@@ -1898,6 +2270,8 @@ class ExamCellParserAdapter:
         if "int" not in ct: ct["int"] = 6
         if "ex" not in ct: ct["ex"] = 7
         if "total" not in ct: ct["total"] = 8
+        if ct.get("total") and ct.get("ex") and ct["total"] == ct["ex"]:
+            ct["total"] = ct["ex"] + 1
 
         nr = col_map["NRST"]
         if "int" not in nr: nr["int"] = 11
@@ -1905,11 +2279,15 @@ class ExamCellParserAdapter:
         if "part_b" not in nr: nr["part_b"] = 13
         if "ex" not in nr: nr["ex"] = 14
         if "total" not in nr: nr["total"] = 15
+        if nr.get("total") and nr.get("ex") and nr["total"] == nr["ex"]:
+            nr["total"] = nr["ex"] + 1
 
         ot = col_map["OBGN_THEORY"]
         if "int" not in ot: ot["int"] = 18
         if "ex" not in ot: ot["ex"] = 19
         if "total" not in ot: ot["total"] = 20
+        if ot.get("total") and ot.get("ex") and ot["total"] == ot["ex"]:
+            ot["total"] = ot["ex"] + 1
 
         op = col_map["OBGN_PRACT"]
         if "int" not in op: op["int"] = 23
@@ -1953,17 +2331,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             ct_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(raw_int if raw_int is not None else (tot_int if not ab_int else "Ab"))
             v_ex = format_numeric_token(raw_ex if raw_ex is not None else (tot_ex if not ab_ex else "Ab"))
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ct_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ct_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ct_grace), 2)
+            else:
+                v_total = 0
 
             courses["COMH_II_THEORY"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ct_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 2. NRST
@@ -1988,17 +2378,39 @@ class ExamCellParserAdapter:
             }
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
-            raw_pa, g_pa, tot_pa, ab_pa = parse_grace_expression(ws.cell(row_idx, pa_c).value)
-            raw_pb, g_pb, tot_pb, ab_pb = parse_grace_expression(ws.cell(row_idx, pb_c).value)
-            raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_pa, g_pa, tot_pa, ab_pa = parse_grace_expression(ws.cell(row_idx, pa_c).value) if pa_c else (None, 0.0, None, False)
+            raw_pb, g_pb, tot_pb, ab_pb = parse_grace_expression(ws.cell(row_idx, pb_c).value) if pb_c else (None, 0.0, None, False)
+            raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value) if ex_c else (None, 0.0, None, False)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
 
             nr_grace = g_int + g_pa + g_pb + g_ex + g_tot
             v_int = format_numeric_token(raw_int if raw_int is not None else (tot_int if not ab_int else "Ab"))
             v_pa = format_numeric_token(raw_pa if raw_pa is not None else (tot_pa if not ab_pa else "Ab"))
             v_pb = format_numeric_token(raw_pb if raw_pb is not None else (tot_pb if not ab_pb else "Ab"))
-            v_ex = format_numeric_token(raw_ex if raw_ex is not None else (tot_ex if not ab_ex else "Ab"))
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Determine external total purely from subcomponents if available
+            if isinstance(v_pa, (int, float)) and isinstance(v_pb, (int, float)):
+                v_ex = round(float(v_pa) + float(v_pb), 2)
+            elif raw_ex is not None:
+                v_ex = format_numeric_token(raw_ex)
+            elif tot_ex is not None:
+                v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
+            elif v_pa == "Ab" and v_pb == "Ab":
+                v_ex = "Ab"
+            else:
+                v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(nr_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(nr_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(nr_grace), 2)
+            else:
+                v_total = 0
 
             courses["NRST"] = {
                 "int_marks": v_int,
@@ -2007,6 +2419,7 @@ class ExamCellParserAdapter:
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(nr_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 3. OBGN_THEORY
@@ -2028,17 +2441,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             ot_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(raw_int if raw_int is not None else (tot_int if not ab_int else "Ab"))
             v_ex = format_numeric_token(raw_ex if raw_ex is not None else (tot_ex if not ab_ex else "Ab"))
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(ot_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(ot_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(ot_grace), 2)
+            else:
+                v_total = 0
 
             courses["OBGN_THEORY"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(ot_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 4. OBGN_PRACT
@@ -2060,17 +2485,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             op_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(raw_int if raw_int is not None else (tot_int if not ab_int else "Ab"))
             v_ex = format_numeric_token(raw_ex if raw_ex is not None else (tot_ex if not ab_ex else "Ab"))
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(op_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(op_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(op_grace), 2)
+            else:
+                v_total = 0
 
             courses["OBGN_PRACT"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(op_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 5. COMH_II_PRACT
@@ -2092,17 +2529,29 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             cp_grace = g_int + g_ex + g_tot
             v_int = format_numeric_token(raw_int if raw_int is not None else (tot_int if not ab_int else "Ab"))
             v_ex = format_numeric_token(raw_ex if raw_ex is not None else (tot_ex if not ab_ex else "Ab"))
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(cp_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(cp_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(cp_grace), 2)
+            else:
+                v_total = 0
 
             courses["COMH_II_PRACT"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(cp_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         return courses, raw_remarks
@@ -2116,11 +2565,13 @@ class ExamCellParserAdapter:
         for c in range(1, ws.max_column + 1):
             p_val = clean_text_string(ws.cell(course_row, c).value).lower()
             s_val = clean_text_string(ws.cell(sub_row, c).value).lower()
+            if any(k in s_val for k in ["letter grade", "grade point", "gp", "sgpa", "percentage", "%", "remark", "result"]):
+                continue
             combined = f"{p_val} {s_val}"
 
             is_int = bool(re.search(r'\bint\b|\bint\.', s_val) or s_val.startswith("int"))
             is_ex = bool(re.search(r'\bex\b|\bex\.', s_val) or "comp ass" in s_val or s_val.startswith("ex"))
-            is_tot = bool("total" in s_val)
+            is_tot = bool("200" in s_val or ("total" in s_val and "100" not in s_val and "ex" not in s_val))
 
             if "inte" in combined or "competency" in combined or "internship" in combined:
                 if is_int and "int" not in col_map["COMPETENCY"]: col_map["COMPETENCY"]["int"] = c
@@ -2135,6 +2586,8 @@ class ExamCellParserAdapter:
         if "int" not in comp: comp["int"] = 6
         if "ex" not in comp: comp["ex"] = 7
         if "total" not in comp: comp["total"] = 8
+        if comp.get("total") and comp.get("ex") and comp["total"] == comp["ex"]:
+            comp["total"] = comp["ex"] + 1
 
         return col_map
 
@@ -2168,33 +2621,62 @@ class ExamCellParserAdapter:
         else:
             raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value)
             raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
             c_grace = g_int + g_ex + g_tot
-            v_int = format_numeric_token(raw_int if raw_int is not None else (tot_int if not ab_int else "Ab"))
-            v_ex = format_numeric_token(raw_ex if raw_ex is not None else (tot_ex if not ab_ex else "Ab"))
-            v_total = tot_final if tot_final is not None else (round(v_int + v_ex, 2) if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)) else 0)
+            v_int = format_numeric_token(tot_int if not ab_int else "Ab")
+            v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab")
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(c_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(c_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(c_grace), 2)
+            else:
+                v_total = 0
 
             courses["COMPETENCY"] = {
                 "int_marks": v_int,
                 "ex_marks": v_ex,
                 "grace": format_numeric_token(c_grace),
                 "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         # 2. ELECTIVE_3 (Optional)
         el_cols = cols.get("ELECTIVE_3", {})
-        if el_cols and "total" in el_cols:
+        if el_cols and ("int" in el_cols or "ex" in el_cols or "total" in el_cols):
             int_c = el_cols.get("int", 0)
             ex_c = el_cols.get("ex", 0)
             tot_c = el_cols.get("total", 0)
-            raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value) if int_c else (0, 0, 0, False)
-            raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value) if ex_c else (0, 0, 0, False)
-            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (0, 0, 0, False)
+            raw_int, g_int, tot_int, ab_int = parse_grace_expression(ws.cell(row_idx, int_c).value) if int_c else (None, 0.0, None, False)
+            raw_ex, g_ex, tot_ex, ab_ex = parse_grace_expression(ws.cell(row_idx, ex_c).value) if ex_c else (None, 0.0, None, False)
+            raw_tot, g_tot, tot_final, _ = parse_grace_expression(ws.cell(row_idx, tot_c).value) if tot_c else (None, 0.0, None, False)
+            el_grace = g_int + g_ex + g_tot
+            v_int = format_numeric_token(tot_int if not ab_int else "Ab") if int_c else 0
+            v_ex = format_numeric_token(tot_ex if not ab_ex else "Ab") if ex_c else 0
+
+            # Ingestion Isolation Rule: Pure in-app total calculation (IA + EA + Grace)
+            if isinstance(v_int, (int, float)) and isinstance(v_ex, (int, float)):
+                v_total = round(float(v_int) + float(v_ex) + float(el_grace), 2)
+            elif v_int == "Ab" and v_ex == "Ab":
+                v_total = "Ab"
+            elif isinstance(v_int, (int, float)):
+                v_total = round(float(v_int) + (float(v_ex) if isinstance(v_ex, (int, float)) else 0.0) + float(el_grace), 2)
+            elif isinstance(v_ex, (int, float)):
+                v_total = round(float(v_ex) + (float(v_int) if isinstance(v_int, (int, float)) else 0.0) + float(el_grace), 2)
+            else:
+                v_total = 0
+
             courses["ELECTIVE_3"] = {
-                "int_marks": format_numeric_token(tot_int if not ab_int else "Ab"),
-                "ex_marks": format_numeric_token(tot_ex if not ab_ex else "Ab"),
-                "grace": format_numeric_token(g_int + g_ex + g_tot),
-                "total": format_numeric_token(tot_final or (tot_int + tot_ex)),
+                "int_marks": v_int,
+                "ex_marks": v_ex,
+                "grace": format_numeric_token(el_grace),
+                "total": format_numeric_token(v_total),
+                "raw_sheet_total": format_numeric_token(tot_final) if tot_final is not None else None,
             }
 
         return courses, raw_remarks

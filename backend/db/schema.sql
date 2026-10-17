@@ -143,7 +143,29 @@ CREATE TABLE IF NOT EXISTS cumulative_academic_summary (
     updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
--- 7. marks_audit_log table (Tracking modifications)
+-- 7. student_backlogs table (Tracking Backlogs & Arrears across Reappear cycles)
+CREATE TABLE IF NOT EXISTS student_backlogs (
+    id SERIAL PRIMARY KEY,
+    student_id INT REFERENCES students(id) ON DELETE CASCADE,
+    course_id INT REFERENCES courses(id) ON DELETE RESTRICT,
+    original_registration_id INT REFERENCES student_semester_registrations(id) ON DELETE CASCADE,
+    failed_exam_month_year VARCHAR(50) NOT NULL,
+    forthcoming_exam_month_year VARCHAR(50),
+    semester_number SMALLINT NOT NULL,
+    academic_year VARCHAR(50),
+    failed_component VARCHAR(50),
+    deficit_marks NUMERIC(5, 2),
+    attempt_count SMALLINT DEFAULT 1,
+    backlog_status VARCHAR(20) DEFAULT 'ACTIVE', -- 'ACTIVE', 'CLEARED', 'DROPPED'
+    cleared_in_registration_id INT REFERENCES student_semester_registrations(id) ON DELETE SET NULL,
+    cleared_at TIMESTAMP WITH TIME ZONE,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_student_backlog ON student_backlogs (student_id, course_id, backlog_status) WHERE backlog_status = 'ACTIVE';
+CREATE INDEX IF NOT EXISTS idx_backlogs_student_sem ON student_backlogs (student_id, semester_number);
+
+-- 8. marks_audit_log table (Tracking modifications)
 CREATE TABLE IF NOT EXISTS marks_audit_log (
     id SERIAL PRIMARY KEY,
     entity_type VARCHAR(50),
@@ -180,3 +202,36 @@ CREATE INDEX IF NOT EXISTS idx_cumulative_student ON cumulative_academic_summary
 CREATE INDEX IF NOT EXISTS idx_audit_roll ON marks_audit_log(student_roll_no);
 CREATE INDEX IF NOT EXISTS idx_audit_sem ON marks_audit_log(semester_number);
 CREATE INDEX IF NOT EXISTS idx_template_design_sem ON template_design_audit_log(semester_number);
+
+-- 9. app_users table (Enterprise Hardened Role-Based Access Control)
+CREATE TABLE IF NOT EXISTS app_users (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE NOT NULL,
+    full_name VARCHAR(150) NOT NULL,
+    email VARCHAR(100),
+    hashed_password VARCHAR(255) NOT NULL,
+    role VARCHAR(30) NOT NULL,
+    is_active BOOLEAN DEFAULT TRUE,
+    must_change_password BOOLEAN DEFAULT TRUE,
+    failed_login_attempts INT DEFAULT 0,
+    locked_until TIMESTAMP WITH TIME ZONE,
+    token_version INT DEFAULT 1,
+    created_by VARCHAR(50) DEFAULT 'Admin',
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    last_login_at TIMESTAMP WITH TIME ZONE
+);
+
+-- 10. auth_security_audit_log table (Authentication Security Audit)
+CREATE TABLE IF NOT EXISTS auth_security_audit_log (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50),
+    action VARCHAR(50) NOT NULL,
+    ip_address VARCHAR(50),
+    user_agent TEXT,
+    timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username ON app_users(username);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_user ON auth_security_audit_log(username);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_time ON auth_security_audit_log(timestamp);
+

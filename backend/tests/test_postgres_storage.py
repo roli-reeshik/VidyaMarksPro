@@ -12,11 +12,13 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.db.database import get_sync_session
 from backend.db.init_db import init_database, seed_courses
-from backend.db.models import Batch, Student, StudentSemesterRegistration, Course, MarksAuditLog
+from backend.db.models import Batch, Student, StudentSemesterRegistration, Course, MarksAuditLog, StudentCourseMark
 from backend.db.repository import ExaminationRepository
 from backend.parsers.template_generator import generate_semester_template
+from backend.security import create_access_token
 
 client = TestClient(app)
+admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': 'Admin', 'role': 'Admin', 'token_version': 1})}"}
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -96,6 +98,7 @@ def test_upload_examination_datasheet_api():
             "exam_month_year": "JANUARY - 2026",
             "exam_type": "MAIN",
         },
+        headers=admin_headers,
     )
 
     assert response.status_code == 200, f"Upload failed: {response.text}"
@@ -110,16 +113,20 @@ def test_get_marksheet_endpoint():
     """Tests GET /api/v1/marksheets/{semester}/{roll_no}."""
     # First get a student from DB
     with get_sync_session() as session:
+        from sqlalchemy import func
         reg = (
             session.query(StudentSemesterRegistration, Student)
             .join(Student, StudentSemesterRegistration.student_id == Student.id)
+            .join(StudentCourseMark, StudentCourseMark.registration_id == StudentSemesterRegistration.id)
             .filter(StudentSemesterRegistration.semester_number == 1)
+            .group_by(StudentSemesterRegistration.id, Student.id)
+            .having(func.count(StudentCourseMark.id) >= 3)
             .first()
         )
-        assert reg is not None, "Expected at least one Sem 1 student in DB"
+        assert reg is not None, "Expected at least one Sem 1 student with full courses in DB"
         roll_no = reg[1].roll_no
 
-    response = client.get(f"/api/v1/marksheets/1/{roll_no}")
+    response = client.get(f"/api/v1/marksheets/1/{roll_no}", headers=admin_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["student"]["roll_no"] == roll_no
@@ -137,7 +144,7 @@ def test_get_batch_marksheets_endpoint():
         assert batch is not None
         batch_id = batch.id
 
-    response = client.get(f"/api/v1/marksheets/1/batch/{batch_id}")
+    response = client.get(f"/api/v1/marksheets/1/batch/{batch_id}", headers=admin_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["batch_id"] == batch_id
@@ -151,7 +158,7 @@ def test_get_analytics_endpoint():
         batch = session.query(Batch).first()
         batch_id = batch.id
 
-    response = client.get(f"/api/v1/analytics/1/{batch_id}")
+    response = client.get(f"/api/v1/analytics/1/{batch_id}", headers=admin_headers)
     assert response.status_code == 200
     data = response.json()
     assert data["semester_number"] == 1
@@ -164,11 +171,11 @@ def test_get_analytics_endpoint():
 
 def test_batches_and_students_routes():
     """Tests GET /api/v1/batches and GET /api/v1/students."""
-    resp_b = client.get("/api/v1/batches")
+    resp_b = client.get("/api/v1/batches", headers=admin_headers)
     assert resp_b.status_code == 200
     assert len(resp_b.json()) >= 1
 
-    resp_s = client.get("/api/v1/students")
+    resp_s = client.get("/api/v1/students", headers=admin_headers)
     assert resp_s.status_code == 200
     assert len(resp_s.json()) >= 1
 

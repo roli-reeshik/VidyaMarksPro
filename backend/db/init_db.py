@@ -525,9 +525,112 @@ def init_database():
             ADD COLUMN IF NOT EXISTS division_classification VARCHAR(50),
             ADD COLUMN IF NOT EXISTS final_result VARCHAR(20),
             ADD COLUMN IF NOT EXISTS overall_result VARCHAR(30);
+
+            CREATE TABLE IF NOT EXISTS app_users (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50) UNIQUE NOT NULL,
+                full_name VARCHAR(150) NOT NULL,
+                hashed_password VARCHAR(255) NOT NULL,
+                role VARCHAR(30) NOT NULL,
+                is_active BOOLEAN DEFAULT TRUE,
+                must_change_password BOOLEAN DEFAULT TRUE,
+                failed_login_attempts INT DEFAULT 0,
+                locked_until TIMESTAMP WITH TIME ZONE,
+                token_version INT DEFAULT 1,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                last_login_at TIMESTAMP WITH TIME ZONE
+            );
+
+            CREATE TABLE IF NOT EXISTS auth_security_audit_log (
+                id SERIAL PRIMARY KEY,
+                username VARCHAR(50),
+                action VARCHAR(50) NOT NULL,
+                ip_address VARCHAR(50),
+                user_agent TEXT,
+                timestamp TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            );
+
+            CREATE TABLE IF NOT EXISTS app_feedback (
+                id SERIAL PRIMARY KEY,
+                user_id INT REFERENCES app_users(id) ON DELETE SET NULL,
+                username VARCHAR(50) NOT NULL,
+                user_role VARCHAR(30) NOT NULL,
+                category VARCHAR(50) NOT NULL,
+                subject VARCHAR(200) NOT NULL,
+                feedback_text TEXT NOT NULL,
+                rating SMALLINT CHECK (rating BETWEEN 1 AND 5),
+                status VARCHAR(20) DEFAULT 'NEW',
+                admin_notes TEXT,
+                submitted_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                resolved_at TIMESTAMP WITH TIME ZONE
+            );
+
+            CREATE TABLE IF NOT EXISTS scrutiny_verifications (
+                id SERIAL PRIMARY KEY,
+                registration_id INT REFERENCES student_semester_registrations(id) ON DELETE CASCADE,
+                student_id INT REFERENCES students(id) ON DELETE CASCADE,
+                semester_number INT NOT NULL,
+                scrutiny_user_id INT REFERENCES app_users(id) ON DELETE SET NULL,
+                scrutiny_username VARCHAR(50) NOT NULL,
+                verification_status VARCHAR(30) NOT NULL,
+                comments TEXT,
+                highlighted_fields JSONB DEFAULT '[]'::jsonb,
+                suggested_changes JSONB DEFAULT '{}'::jsonb,
+                iteration_number INT DEFAULT 1,
+                verified_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                is_actioned_by_admin BOOLEAN DEFAULT FALSE,
+                actioned_by_admin_username VARCHAR(50),
+                actioned_at TIMESTAMP WITH TIME ZONE
+            );
+
+            ALTER TABLE student_semester_registrations ADD COLUMN IF NOT EXISTS scrutiny_status VARCHAR(30) DEFAULT 'PENDING';
+            ALTER TABLE student_semester_registrations ADD COLUMN IF NOT EXISTS last_scrutinized_at TIMESTAMP WITH TIME ZONE;
+            ALTER TABLE app_users ADD COLUMN IF NOT EXISTS email VARCHAR(100);
+            ALTER TABLE app_users ADD COLUMN IF NOT EXISTS created_by VARCHAR(50) DEFAULT 'Admin';
+
+            CREATE INDEX IF NOT EXISTS idx_users_username ON app_users(username);
+            CREATE INDEX IF NOT EXISTS idx_auth_audit_user ON auth_security_audit_log(username);
+            CREATE INDEX IF NOT EXISTS idx_auth_audit_time ON auth_security_audit_log(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_feedback_status_cat ON app_feedback(status, category);
+            CREATE INDEX IF NOT EXISTS idx_feedback_user ON app_feedback(username);
+            CREATE INDEX IF NOT EXISTS idx_scrutiny_reg_iter ON scrutiny_verifications(registration_id, iteration_number);
+            CREATE INDEX IF NOT EXISTS idx_scrutiny_actioned ON scrutiny_verifications(is_actioned_by_admin);
         """))
         conn.commit()
     print("Database tables initialized successfully.")
+    seed_default_users()
+
+
+DEFAULT_USERS = [
+    {"username": "Admin", "password": "Admin", "role": "Admin", "full_name": "System Administrator"},
+]
+
+
+def seed_default_users():
+    """Seeds default institutional RBAC accounts if app_users is empty."""
+    from backend.db.models import AppUser
+    from backend.security import hash_password
+    with get_sync_session() as session:
+        user_count = session.query(AppUser).count()
+        if user_count == 0:
+            print("Seeding default institutional RBAC user accounts...")
+            for u in DEFAULT_USERS:
+                new_user = AppUser(
+                    username=u["username"],
+                    full_name=u["full_name"],
+                    role=u["role"],
+                    hashed_password=hash_password(u["password"]),
+                    is_active=True,
+                    must_change_password=False,
+                    failed_login_attempts=0,
+                    locked_until=None,
+                    token_version=1,
+                )
+                session.add(new_user)
+            session.commit()
+            print(f"Successfully seeded {len(DEFAULT_USERS)} default institutional accounts.")
+        else:
+            print(f"app_users already populated ({user_count} accounts found). Skipping user seeding.")
 
 
 def seed_courses():
@@ -573,3 +676,4 @@ def seed_courses():
 if __name__ == "__main__":
     init_database()
     seed_courses()
+

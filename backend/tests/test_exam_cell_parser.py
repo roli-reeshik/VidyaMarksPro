@@ -594,4 +594,151 @@ def test_parser_against_vinod_sir_sem4_master_data_and_3section_split():
     assert len(audit_report.anomalies) == 0
 
 
+def test_sem3_ahn_i_theory_column_mapping_and_parity_lock_resolution():
+    """
+    Verifies that for Semester 3 Adult Health Nursing - I (N-AHN (I) 215):
+    - Col 13 'Int. (25)' binds to internal_obtained (17.0)
+    - Col 14 'Total (75)' binds to external_obtained (49.0)
+    - Col 15 'Total (100)' binds to total_obtained (66.0)
+    - Total (75) is NEVER mistakenly mapped to total_obtained.
+    - Quality Audit Gate verifies IA (17.0) + EA (49.0) = 66.0 == Sheet Total (66.0),
+      resulting in 0 Critical Parity Violations and unlocked marksheet generation.
+    """
+    from backend.evaluation_engine import EvaluationEngine
+    from backend.audit_engine import QualityAuditGate
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Semester -I"
+
+    # Row 1: Blank
+    # Row 2: Course Headers
+    ws.cell(row=2, column=1, value="S.No.")
+    ws.cell(row=2, column=2, value="Name")
+    ws.cell(row=2, column=3, value="Father's Name")
+    ws.cell(row=2, column=4, value="Enroll No.")
+    ws.cell(row=2, column=5, value="Roll NO.")
+    ws.cell(row=2, column=6, value="Applied Microbiology & Infection Control including patient safety (Code No. MICR-201)")
+    ws.cell(row=2, column=13, value="Adult Health Nursing - I (Code No. N-AHN (I) 215)")
+    ws.cell(row=2, column=18, value="Adult Health Nursing - I (Practical) (Code No. N-AHN (I) 215)")
+    ws.cell(row=2, column=23, value="Grand Total (300)")
+    ws.cell(row=2, column=24, value="Result/ Remark")
+
+    # Row 3: Subcomponent Headers
+    ws.cell(row=3, column=6, value="Int. 25")
+    ws.cell(row=3, column=7, value="MICRO (Ex. 37)")
+    ws.cell(row=3, column=8, value="INFC (Ex. 38)")
+    ws.cell(row=3, column=9, value="Total (75)")
+    ws.cell(row=3, column=10, value="Total (100)")
+    ws.cell(row=3, column=11, value="Letter Grade")
+    ws.cell(row=3, column=12, value="Grade Point")
+
+    # The exact columns from the bug report
+    ws.cell(row=3, column=13, value="Int. (25)")
+    ws.cell(row=3, column=14, value="Total (75)")
+    ws.cell(row=3, column=15, value="Total (100)")
+    ws.cell(row=3, column=16, value="Letter Grade")
+    ws.cell(row=3, column=17, value="Grade Point")
+
+    ws.cell(row=3, column=18, value="Int. (50)")
+    ws.cell(row=3, column=19, value="Ex. (50)")
+    ws.cell(row=3, column=20, value="Total (100)")
+    ws.cell(row=3, column=21, value="Letter Grade")
+    ws.cell(row=3, column=22, value="Grade Point")
+
+    # Row 4: Student Data (Abhinandan Kumar Sharma)
+    ws.cell(row=4, column=1, value=1)
+    ws.cell(row=4, column=2, value="ABHINANDAN KUMAR SHARMA")
+    ws.cell(row=4, column=3, value="KANHAIYA LAL SHARMA")
+    ws.cell(row=4, column=4, value=2022451)
+    ws.cell(row=4, column=5, value=202203001)
+
+    # MICR
+    ws.cell(row=4, column=6, value=17)
+    ws.cell(row=4, column=7, value=25)
+    ws.cell(row=4, column=8, value=26)
+    ws.cell(row=4, column=9, value=51)
+    ws.cell(row=4, column=10, value=68)
+    ws.cell(row=4, column=11, value="B+")
+    ws.cell(row=4, column=12, value=7)
+
+    # AHN_I_THEORY
+    ws.cell(row=4, column=13, value=17.0)
+    ws.cell(row=4, column=14, value=49.0)
+    ws.cell(row=4, column=15, value=66.0)
+    ws.cell(row=4, column=16, value="B+")
+    ws.cell(row=4, column=17, value=7)
+
+    # AHN_I_PRACT
+    ws.cell(row=4, column=18, value=37.0)
+    ws.cell(row=4, column=19, value=35.0)
+    ws.cell(row=4, column=20, value=72.0)
+    ws.cell(row=4, column=21, value="B+")
+    ws.cell(row=4, column=22, value=7)
+
+    ws.cell(row=4, column=23, value=206.0)
+    ws.cell(row=4, column=24, value="Pass")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+
+    adapter = ExamCellParserAdapter(buf.getvalue(), semester=3)
+    records = adapter.parse()
+
+    assert len(records) == 1
+    rec = records[0]
+    assert rec.student_name == "ABHINANDAN KUMAR SHARMA"
+
+    # Assert AHN Theory mapping
+    ahn_theory = rec.courses["AHN_I_THEORY"]
+    assert ahn_theory["int_marks"] == 17.0, f"Expected 17.0, got {ahn_theory['int_marks']}"
+    assert ahn_theory["ex_marks"] == 49.0, f"Expected 49.0, got {ahn_theory['ex_marks']}"
+    assert ahn_theory["total"] == 66.0, f"Expected 66.0, got {ahn_theory['total']} (Bug: mapped Total (75) to total!)"
+
+    # Evaluation & Audit
+    engine = EvaluationEngine(3)
+    eval_res = engine.evaluate_batch(records)
+    assert eval_res.results[0].result_status == "PASS"
+
+    gate = QualityAuditGate(3)
+    audit = gate.audit_batch(records, eval_res.results)
+    assert audit.is_valid is True
+    assert audit.critical_errors_count == 0
+    assert audit.can_export_pdf is True
+
+
+def test_sem3_real_master_data_ingestion_and_zero_parity_errors():
+    """
+    Tests against real 3rd Semester Master Data files on disk if present.
+    Verifies 0 critical parity errors across all candidates.
+    """
+    import os
+    from backend.evaluation_engine import EvaluationEngine
+    from backend.audit_engine import QualityAuditGate
+
+    candidate_paths = [
+        r"E:\Examination\MARKS DATA\20. B.Sc.Nursing Fourth Year (Eighth Semester) 2022-2026 Batch\2. Second Year\3rd Semester\3rd Semester Master Data.xlsx",
+        r"E:\Examination\MARKS DATA\5.Data sheet B.Sc. Nursing Second Year Third Semester (Main & Re-appear) Examination Held in the Month of January 2026\3rd Semester Master Data.xlsx",
+    ]
+    existing_paths = [p for p in candidate_paths if os.path.exists(p)]
+    if not existing_paths:
+        pytest.skip("No real 3rd Semester Master Data file found on disk.")
+
+    for path in existing_paths:
+        with open(path, "rb") as f:
+            adapter = ExamCellParserAdapter(f.read(), semester=3)
+            records = adapter.parse()
+
+        assert len(records) > 0
+        engine = EvaluationEngine(3)
+        eval_res = engine.evaluate_batch(records)
+        gate = QualityAuditGate(3)
+        audit = gate.audit_batch(records, eval_res.results)
+
+        assert audit.is_valid is True, f"Parity errors found in {path}: {audit.anomalies}"
+        assert audit.critical_errors_count == 0
+        assert audit.can_export_pdf is True
+
+
 

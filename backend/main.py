@@ -25,6 +25,14 @@ from backend.routes.pdf_route import router as pdf_router
 from backend.routes.examination_db_route import router as examination_db_router
 from backend.routes.tabulation_register_route import router as tabulation_register_router
 from backend.routes.workflow_route import router as workflow_router
+from backend.routes.auth_route import router as auth_router
+from backend.routes.user_management_route import router as user_management_router
+from backend.routes.analytics_route import router as analytics_router
+from backend.routes.export_route import router as export_router
+from backend.routes.feedback_route import router as feedback_router
+from backend.routes.scrutiny_route import router as scrutiny_router
+from backend.routes.backlog_route import router as backlog_router
+from backend.routes.diagnostic_route import router as diagnostic_router
 from backend.db.init_db import init_database, seed_courses
 
 app = FastAPI(
@@ -38,26 +46,41 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Enable CORS for Next.js frontend (standard ports 3000, 3001, etc.)
+# Enable CORS with credentials support for Next.js frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+    ],
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1)(:\d+)?",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Include API Routers
+app.include_router(auth_router)
 app.include_router(upload_router)
 app.include_router(schemas_router)
 app.include_router(grading_router)
 app.include_router(exam_cell_router)
 app.include_router(evaluation_router)
 app.include_router(audit_router)
+app.include_router(analytics_router)
+app.include_router(backlog_router)
+app.include_router(diagnostic_router)
+app.include_router(export_router)
+app.include_router(feedback_router)
+app.include_router(scrutiny_router)
 app.include_router(pdf_router)
 app.include_router(examination_db_router)
 app.include_router(tabulation_register_router)
 app.include_router(workflow_router)
+app.include_router(user_management_router)
+
 
 
 @app.on_event("startup")

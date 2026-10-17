@@ -210,8 +210,8 @@ export const ALL_SEMESTERS_DATA: Record<number, SemesterDefinition> = {
             total_max: 100,
             min_pass_percentage: 50.0,
             sub_components: [
-              { name: "Applied Biochemistry", code: "BIOC 135", max_marks: 37 },
-              { name: "Applied Nutrition & Dietetics", code: "NUTR 140", max_marks: 38 }
+              { name: "Applied Biochemistry", code: "BIOC 135", max_marks: 25 },
+              { name: "Applied Nutrition & Dietetics", code: "NUTR 140", max_marks: 50 }
             ]
           }
         ]
@@ -347,8 +347,8 @@ export const ALL_SEMESTERS_DATA: Record<number, SemesterDefinition> = {
     degree_title: "B.Sc. NURSING",
     college_name: "COLLEGE OF NURSING, SGPGIMS, LUCKNOW, UTTAR PRADESH.",
     college_code: "1313",
-    total_prescribed_credits: 21,
-    sgpa_eligible_credits: 20,
+    total_prescribed_credits: 22,
+    sgpa_eligible_credits: 21,
     grand_total_marks: 350,
     courses: [
       {
@@ -371,8 +371,9 @@ export const ALL_SEMESTERS_DATA: Record<number, SemesterDefinition> = {
             total_max: 100,
             min_pass_percentage: 50.0,
             sub_components: [
-              { name: "Pharmacology (I & II)", code: "PHAR 205", max_marks: 38 },
-              { name: "Pathology (I & II) & Genetics", code: "PATH 210", max_marks: 37 }
+              { name: "Pharmacology", code: "PHAR 205", max_marks: 38 },
+              { name: "Pathology", code: "PATH 210", max_marks: 25 },
+              { name: "Genetics", code: "PATH 210 (GEN)", max_marks: 12 }
             ]
           }
         ]
@@ -726,7 +727,11 @@ export const ALL_SEMESTERS_DATA: Record<number, SemesterDefinition> = {
             ia_max: 25,
             ea_max: 75,
             total_max: 100,
-            min_pass_percentage: 50.0
+            min_pass_percentage: 50.0,
+            sub_components: [
+              { name: "Nursing Research", code: "NRST 405 (NUR)", max_marks: 55 },
+              { name: "Statistics", code: "NRST 405 (STAT)", max_marks: 20 }
+            ]
           }
         ]
       },
@@ -773,7 +778,7 @@ export const ALL_SEMESTERS_DATA: Record<number, SemesterDefinition> = {
     college_code: "1313",
     total_prescribed_credits: 13,
     sgpa_eligible_credits: 12,
-    grand_total_marks: 300,
+    grand_total_marks: 200,
     courses: [
       {
         sl_no: 1,

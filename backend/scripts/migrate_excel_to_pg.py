@@ -142,14 +142,16 @@ def migrate_workbook(
 
                 # Upsert Course Marks
                 for comp in record.courses:
-                    db_course = repo.get_course_by_code(sem_num, comp.course_code)
-                    if not db_course:
-                        # Fallback by course title substring
-                        sem_courses = repo.get_semester_courses(sem_num)
-                        for sc in sem_courses:
-                            if any(w.lower() in sc.course_title.lower() for w in comp.course_title.split()[:2]):
-                                db_course = sc
-                                break
+                    comp_name = getattr(comp, "component_name", None)
+                    comp_title = getattr(comp, "course_title", None)
+                    comp_cr = getattr(comp, "credits", None)
+                    db_course = repo.resolve_course(
+                        semester_number=sem_num,
+                        course_code=comp.course_code,
+                        component_name=comp_name,
+                        course_title=comp_title,
+                        credits=comp_cr
+                    )
 
                     if not db_course:
                         print(f"  Warning: Course {comp.course_code} not found in catalog for Sem {sem_num}. Skipping course mark.")

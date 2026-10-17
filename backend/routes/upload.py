@@ -6,11 +6,13 @@ Compliant with INC Gazette & SGPGIMS Lucknow Regulations.
 import io
 from typing import Optional, List, Any
 import openpyxl
-from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status
+from fastapi import APIRouter, File, UploadFile, Form, HTTPException, status, Depends
 from pydantic import BaseModel
 
 from backend.parsers.excel_parser import ExcelSheetParser, clean_str, detect_semester_from_text
+from backend.parsers.exam_cell_parser import robust_load_workbook, ExamCellParserAdapter
 from backend.schemas.student_schemas import IngestionResponse
+from backend.security import require_operator, AuthenticatedUser
 
 router = APIRouter(prefix="/api", tags=["Excel Ingestion"])
 
@@ -53,7 +55,7 @@ async def inspect_uploaded_file(
         )
 
     try:
-        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+        wb = robust_load_workbook(content, data_only=True)
         sheets_info: List[SheetInfo] = []
         recommended_sheet = None
         detected_sem = None
@@ -105,7 +107,8 @@ async def inspect_uploaded_file(
 async def upload_examination_sheet(
     file: UploadFile = File(..., description="Excel marksheet file (.xlsx, .xls)"),
     semester: Optional[int] = Form(None, ge=1, le=8, description="Optional explicit semester number (1-8)"),
-    sheet_name: Optional[str] = Form(None, description="Optional sheet name to parse")
+    sheet_name: Optional[str] = Form(None, description="Optional sheet name to parse"),
+    current_user: AuthenticatedUser = Depends(require_operator),
 ):
     """
     Ingests B.Sc. Nursing Examination Excel sheet (.xlsx / .xls),
@@ -184,14 +187,34 @@ async def upload_examination_sheet(
                                 modified_by="API_UPLOAD_SYNC"
                             )
                             for comp in rec.courses:
-                                db_course = repo.get_course_by_code(response.semester, comp.course_code)
-                                if not db_course:
-                                    sem_courses = repo.get_semester_courses(response.semester)
-                                    for sc in sem_courses:
-                                        if any(w.lower() in sc.course_title.lower() for w in comp.course_title.split()[:2]):
-                                            db_course = sc
-                                            break
+                                comp_name = getattr(comp, "component_name", None)
+                                comp_title = getattr(comp, "course_title", None)
+                                comp_cr = getattr(comp, "credits", None)
+                                db_course = repo.resolve_course(
+                                    semester_number=response.semester,
+                                    course_code=comp.course_code,
+                                    component_name=comp_name,
+                                    course_title=comp_title,
+                                    credits=comp_cr
+                                )
                                 if db_course:
+                                    part_a = None
+                                    part_b = None
+                                    part_c = None
+                                    if hasattr(comp, "sub_components") and comp.sub_components:
+                                        if isinstance(comp.sub_components, list):
+                                            if len(comp.sub_components) > 0 and getattr(comp.sub_components[0], "obtained", None) is not None:
+                                                part_a = float(comp.sub_components[0].obtained)
+                                            if len(comp.sub_components) > 1 and getattr(comp.sub_components[1], "obtained", None) is not None:
+                                                part_b = float(comp.sub_components[1].obtained)
+                                            if len(comp.sub_components) > 2 and getattr(comp.sub_components[2], "obtained", None) is not None:
+                                                part_c = float(comp.sub_components[2].obtained)
+
+                                    is_ex = (
+                                        getattr(comp, "is_exempted", False)
+                                        or str(getattr(comp, "internal_obtained", "")).strip().upper() in ["EX.", "EX", "EXEMPTED"]
+                                        or str(getattr(comp, "external_obtained", "")).strip().upper() in ["EX.", "EX", "EXEMPTED"]
+                                    )
                                     repo.upsert_course_mark(
                                         registration_id=reg.id,
                                         course_id=db_course.id,
@@ -199,12 +222,16 @@ async def upload_examination_sheet(
                                         external_obtained=float(comp.external_obtained or 0.0),
                                         total_obtained=float(comp.total_obtained or 0.0),
                                         percentage=float(comp.percentage or 0.0),
-                                        letter_grade=comp.letter_grade or "C",
+                                        letter_grade=comp.letter_grade or ("P" if is_ex else "C"),
                                         grade_point=int(comp.grade_point or 0),
-                                        course_result="PASS" if comp.is_pass else "FAIL",
+                                        course_result="PASS" if (comp.is_pass or is_ex) else "FAIL",
                                         grace_awarded=float(comp.grace_marks or 0.0),
+                                        external_part_a=part_a,
+                                        external_part_b=part_b,
+                                        external_part_c=part_c,
+                                        is_exempted=is_ex,
                                         student_roll_no=clean_roll,
-                                        modified_by="API_UPLOAD_SYNC"
+                                        modified_by="DATASHEET_REUPLOAD_UPDATE"
                                     )
                             repo.recalculate_cumulative_summary(student.id)
                             session.commit()

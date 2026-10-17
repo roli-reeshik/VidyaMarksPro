@@ -24,4 +24,4 @@ for /f "tokens=5" %%a in ('netstat -aon ^| findstr ":3000" ^| findstr "LISTENING
 
 echo.
 echo All VidyaMarksheet services have been successfully stopped.
-timeout /t 3 > nul
+ping -n 4 127.0.0.1 > nul

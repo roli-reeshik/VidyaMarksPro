@@ -263,6 +263,7 @@ export function getStoredLayoutConfig(semester: number): LayoutStudioConfig {
 }
 
 export async function syncLayoutToBackend(config: LayoutStudioConfig, _semester?: number): Promise<boolean> {
+  void _semester;
   try {
     const payload = {
       col_width_sno: config.colWidthSno,

@@ -105,7 +105,8 @@ echo.
 
 echo 2. Pushing code changes to GitHub...
 set /p COMMIT_MSG="Enter commit summary (or press Enter for default): "
-if "%COMMIT_MSG%"=="" set COMMIT_MSG="Home sync: %DATE% %TIME%"
+set CURRENT_TIME=%TIME: =0%
+if "%COMMIT_MSG%"=="" set COMMIT_MSG=Home sync: %DATE% %CURRENT_TIME%
 
 git add .
 git commit -m "%COMMIT_MSG%"
@@ -201,7 +202,8 @@ echo.
 
 echo 2. Pushing code changes to GitHub...
 set /p COMMIT_MSG="Enter commit summary (or press Enter for default): "
-if "%COMMIT_MSG%"=="" set COMMIT_MSG="Office sync: %DATE% %TIME%"
+set CURRENT_TIME=%TIME: =0%
+if "%COMMIT_MSG%"=="" set COMMIT_MSG=Office sync: %DATE% %CURRENT_TIME%
 
 git add .
 git commit -m "%COMMIT_MSG%"

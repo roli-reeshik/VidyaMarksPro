@@ -496,6 +496,33 @@ ALL_SEMESTER_CANONICAL_METADATA: Dict[int, Dict[str, Dict[str, Any]]] = {
 }
 
 
+STATUTORY_SGPA_CREDITS: Dict[int, int] = {
+    1: 12,
+    2: 31,
+    3: 17,
+    4: 21,
+    5: 11,
+    6: 21,
+    7: 26,
+    8: 12,
+}
+
+
+class SemesterEvaluationResult(dict):
+    """
+    Standardized semester evaluation result container.
+    Supports both dictionary access (res['sgpa']) and attribute access (res.sgpa).
+    """
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self[name]
+        except KeyError:
+            raise AttributeError(f"'SemesterEvaluationResult' object has no attribute '{name}'")
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        self[name] = value
+
+
 def format_grace_string(val: float) -> str:
     """
     Formats grace value into clean representation conforming to [X.X]:
@@ -1033,3 +1060,312 @@ class EvaluationEngine:
             grace_notes=grace_notes,
             sub_components=c_data["sub_components"]
         )
+
+
+def evaluate_student_semester(
+    registration_data: Any,
+    course_catalog: Optional[Any] = None,
+    semester_number: Optional[int] = None
+) -> SemesterEvaluationResult:
+    """
+    Standardized In-App Re-Calculation Pipeline for B.Sc. Nursing Semesters 1 to 8.
+    Compliant with INC Gazette Corrigendum (April 19, 2022 / No. 205).
+    
+    Ingestion Isolation Rule:
+    Strictly calculates totals, percentages, grade points, letter grades, credit points,
+    SGPA, and backlog queue using raw components ONLY. Never trusts pre-calculated totals
+    or grades from sheets or incoming payloads.
+    
+    Statutory SGPA Credits:
+      Sem 1: 12, Sem 2: 31, Sem 3: 17, Sem 4: 21,
+      Sem 5: 11, Sem 6: 21, Sem 7: 26, Sem 8: 12
+    """
+    # 1. Demographic extraction
+    if isinstance(registration_data, dict):
+        roll_no = str(registration_data.get("roll_no") or "").strip()
+        enroll_no = str(registration_data.get("enroll_no") or registration_data.get("enrollment_no") or "").strip()
+        student_name = str(registration_data.get("student_name") or registration_data.get("name") or "").strip()
+        father_name = str(registration_data.get("father_name") or "").strip()
+        raw_remarks = registration_data.get("raw_remarks") or registration_data.get("remarks")
+        courses_raw = registration_data.get("courses") or registration_data.get("course_marks") or {}
+        inferred_sem = semester_number or registration_data.get("semester_number") or registration_data.get("semester")
+    else:
+        if hasattr(registration_data, "student") and registration_data.student:
+            stu = registration_data.student
+            roll_no = str(getattr(stu, "roll_no", "") or "").strip()
+            enroll_no = str(getattr(stu, "enrollment_no", getattr(stu, "enroll_no", "")) or "").strip()
+            student_name = str(getattr(stu, "name", getattr(stu, "student_name", "")) or "").strip()
+            father_name = str(getattr(stu, "father_name", "") or "").strip()
+        else:
+            roll_no = str(getattr(registration_data, "roll_no", "") or "").strip()
+            enroll_no = str(getattr(registration_data, "enroll_no", getattr(registration_data, "enrollment_no", "")) or "").strip()
+            student_name = str(getattr(registration_data, "student_name", getattr(registration_data, "name", "")) or "").strip()
+            father_name = str(getattr(registration_data, "father_name", "") or "").strip()
+
+        raw_remarks = getattr(registration_data, "raw_remarks", getattr(registration_data, "remarks", None))
+        courses_raw = getattr(registration_data, "courses", getattr(registration_data, "course_marks", {}))
+        inferred_sem = semester_number or getattr(registration_data, "semester_number", getattr(registration_data, "semester", None))
+
+    # 2. Convert courses into dictionary of items
+    courses_dict: Dict[str, Dict[str, Any]] = {}
+    if isinstance(courses_raw, dict):
+        for k, v in courses_raw.items():
+            if hasattr(v, "model_dump"):
+                cd = v.model_dump()
+            elif hasattr(v, "dict"):
+                cd = v.dict()
+            elif isinstance(v, dict):
+                cd = dict(v)
+            else:
+                cd = {"total": v}
+            courses_dict[k] = cd
+    elif isinstance(courses_raw, (list, tuple)):
+        for idx, item in enumerate(courses_raw):
+            if hasattr(item, "model_dump"):
+                cd = item.model_dump()
+            elif hasattr(item, "dict"):
+                cd = item.dict()
+            elif isinstance(item, dict):
+                cd = dict(item)
+            else:
+                continue
+            k = cd.get("course_code") or cd.get("course_key") or cd.get("code") or f"COURSE_{idx+1}"
+            courses_dict[k] = cd
+
+    # 3. Semester detection
+    if inferred_sem:
+        try:
+            sem_num = int(inferred_sem)
+        except (ValueError, TypeError):
+            sem_num = 1
+    else:
+        keys_str = " ".join([str(k) + " " + str(v.get("course_code", "")) + " " + str(v.get("course_title", "")) for k, v in courses_dict.items()]).upper()
+        if "COMPETENCY" in keys_str or "INTE 415" in keys_str:
+            sem_num = 8
+        elif "COMH (II)" in keys_str or "COMH_II" in keys_str or "NRST" in keys_str or "OBGN" in keys_str:
+            sem_num = 7
+        elif "CHN" in keys_str or "MHN" in keys_str or "NMLE" in keys_str:
+            sem_num = 6
+        elif "COMH (I)" in keys_str or "COMH_I" in keys_str or "EDUC" in keys_str or "FORN" in keys_str:
+            sem_num = 5
+        elif "PHAR" in keys_str or "PATH" in keys_str or "AHN (II)" in keys_str or "AHN_II" in keys_str or "PROF" in keys_str:
+            sem_num = 4
+        elif "MICR" in keys_str or "AHN (I)" in keys_str or "AHN_I" in keys_str:
+            sem_num = 3
+        elif "BIOC" in keys_str or "NUTR" in keys_str or "N-NF" in keys_str or "NNF" in keys_str or "HNIT" in keys_str:
+            sem_num = 2
+        else:
+            sem_num = 1
+
+    from backend.schemas.course_schemas import SemesterDefinition
+    sem_def = course_catalog if isinstance(course_catalog, SemesterDefinition) else SEMESTER_DEFINITIONS.get(sem_num)
+    meta_dict = ALL_SEMESTER_CANONICAL_METADATA.get(sem_num, {})
+
+    evaluated_courses: Dict[str, Dict[str, Any]] = {}
+    failed_courses: List[str] = []
+    backlog_queue: List[Dict[str, Any]] = []
+
+    # Map candidate courses against metadata
+    for c_key, c_data in courses_dict.items():
+        # Match metadata
+        matched_meta = meta_dict.get(c_key)
+        if not matched_meta:
+            c_code_input = str(c_data.get("course_code", "")).strip().upper()
+            c_title_input = str(c_data.get("course_title", "")).strip().upper()
+            for mk, mv in meta_dict.items():
+                if c_code_input and (mv["course_code"].upper() in c_code_input or c_code_input in mv["course_code"].upper()):
+                    comp_name = str(c_data.get("component_name", "")).upper()
+                    if comp_name:
+                        if "PRACT" in comp_name and "PRACT" in mk:
+                            matched_meta = mv
+                            break
+                        elif "THEORY" in comp_name and "THEORY" in mk:
+                            matched_meta = mv
+                            break
+                    if not matched_meta:
+                        matched_meta = mv
+                elif c_title_input and (mv["course_title"].upper() in c_title_input or c_title_input in mv["course_title"].upper()):
+                    matched_meta = mv
+                    break
+
+        course_code = matched_meta["course_code"] if matched_meta else (c_data.get("course_code") or c_key)
+        course_title = matched_meta["course_title"] if matched_meta else (c_data.get("course_title") or c_data.get("subject_name") or course_code)
+        credits = matched_meta["credits"] if matched_meta else int(c_data.get("credits") or 0)
+        ia_max = float(matched_meta["ia_max"] if matched_meta else (c_data.get("ia_max") or c_data.get("internal_max") or 25.0))
+        ea_max = float(matched_meta["ea_max"] if matched_meta else (c_data.get("ea_max") or c_data.get("external_max") or 75.0))
+        total_max = float(matched_meta["total_max"] if matched_meta else (c_data.get("total_max") or (ia_max + ea_max)))
+        is_eng_el = (
+            matched_meta["is_english_or_elective"] if matched_meta
+            else (bool(c_data.get("is_english_or_elective", False)) or any(x in str(course_code).upper() for x in ["ENGL", "ELECTIVE"]) or "SCIENTIFIC WRITING" in str(course_title).upper())
+        )
+        include_in_sgpa = (
+            matched_meta["include_in_sgpa"] if matched_meta
+            else (False if is_eng_el else bool(c_data.get("include_in_sgpa", True)))
+        )
+
+        # Raw component extraction (NEVER trust pre-calculated sheet total or grades)
+        raw_ia = c_data.get("int_marks") if "int_marks" in c_data else (c_data.get("internal_obtained") if "internal_obtained" in c_data else c_data.get("ia"))
+        int_sc, int_ab = parse_numeric_score(raw_ia)
+
+        pa = c_data.get("ex_part_a") or c_data.get("external_part_a")
+        pb = c_data.get("ex_part_b") or c_data.get("external_part_b")
+        pc = c_data.get("ex_part_c") or c_data.get("external_part_c")
+        raw_ea = c_data.get("ex_total") if "ex_total" in c_data else (c_data.get("ex_marks") if "ex_marks" in c_data else (c_data.get("external_obtained") if "external_obtained" in c_data else c_data.get("ea")))
+
+        if (pa is not None or pb is not None or pc is not None) and (raw_ea is None or raw_ea == 0):
+            spa, pa_ab = parse_numeric_score(pa)
+            spb, pb_ab = parse_numeric_score(pb)
+            spc, pc_ab = parse_numeric_score(pc)
+            ex_sc = round((spa or 0.0) + (spb or 0.0) + (spc or 0.0), 2)
+            ex_ab = (pa_ab if pa is not None else False) or (pb_ab if pb is not None else False) or (pc_ab if pc is not None else False)
+        else:
+            ex_sc, ex_ab = parse_numeric_score(raw_ea)
+
+        g_val, _ = parse_numeric_score(c_data.get("grace") or c_data.get("grace_marks") or c_data.get("grace_awarded") or 0.0)
+        course_grace = float(g_val or 0.0)
+
+        is_exempt = (
+            bool(c_data.get("is_exempted", False)) or
+            str(c_data.get("letter_grade", "")).strip() == "Ex." or
+            str(raw_ia).strip().upper() in ["EX.", "EX", "X", "EXEMPTED"] or
+            str(raw_ea).strip().upper() in ["EX.", "EX", "X", "EXEMPTED"]
+        )
+        is_absent = (int_ab or ex_ab) and not is_exempt
+
+        # Pure in-app calculation: Total = IA + EA + Grace
+        if is_absent:
+            total_obtained = 0.0
+        elif is_exempt:
+            total_obtained = round((int_sc or 0.0) + (ex_sc or 0.0) + course_grace, 2)
+        else:
+            total_obtained = round((int_sc or 0.0) + (ex_sc or 0.0) + course_grace, 2)
+
+        # Threshold verification
+        pass_cutoff_pct = 0.40 if is_eng_el else 0.50
+        ia_thresh = round(ia_max * pass_cutoff_pct, 2)
+        ea_thresh = round(ea_max * pass_cutoff_pct, 2)
+        tot_thresh = round(total_max * pass_cutoff_pct, 2)
+
+        ia_pass = (int_sc is not None) and (int_sc >= ia_thresh) if not is_absent else False
+        ea_pass = (ex_sc is not None) and ((ex_sc + course_grace) >= ea_thresh) if not is_absent else False
+        tot_pass = (total_obtained >= tot_thresh) if not is_absent else False
+
+        course_is_pass = (ia_pass and ea_pass and tot_pass) or is_exempt
+        has_failed_threshold = (not course_is_pass) and (not is_absent) and (not is_exempt)
+
+        if is_exempt:
+            letter_grade = "Ex."
+            grade_point = 0
+            percentage = 0.0
+            course_is_pass = True
+        else:
+            grade_res = calculate_inc_grade(
+                obtained_marks=total_obtained if not is_absent else None,
+                max_marks=total_max,
+                is_english_or_elective=is_eng_el,
+                is_absent=is_absent,
+                has_failed_threshold=has_failed_threshold
+            )
+            letter_grade = grade_res.letter_grade
+            grade_point = grade_res.grade_point
+            percentage = grade_res.percentage
+            course_is_pass = grade_res.is_pass
+
+        credit_points = round(credits * grade_point, 2) if (course_is_pass and include_in_sgpa) else 0.0
+
+        if (not course_is_pass or letter_grade == "F") and not is_exempt:
+            failed_courses.append(course_title)
+            if not ia_pass and not ea_pass:
+                failed_comp = "Both IA and EA"
+                def_ia = max(0.0, ia_thresh - (int_sc or 0.0))
+                def_ea = max(0.0, ea_thresh - ((ex_sc or 0.0) + course_grace))
+                deficit = round(def_ia + def_ea, 2)
+            elif not ea_pass:
+                failed_comp = "Theory/External"
+                deficit = round(max(0.0, ea_thresh - ((ex_sc or 0.0) + course_grace)), 2)
+            elif not ia_pass:
+                failed_comp = "Internal"
+                deficit = round(max(0.0, ia_thresh - (int_sc or 0.0)), 2)
+            else:
+                failed_comp = "Aggregate"
+                deficit = round(max(0.0, tot_thresh - total_obtained), 2)
+
+            backlog_queue.append({
+                "course_code": course_code,
+                "course_title": course_title,
+                "failed_component": failed_comp,
+                "deficit_marks": deficit,
+                "attempt_count": 1,
+                "backlog_status": "ACTIVE",
+                "semester_number": sem_num,
+                "roll_no": roll_no,
+                "student_name": student_name,
+            })
+
+        evaluated_courses[c_key] = {
+            "course_key": c_key,
+            "course_code": course_code,
+            "course_title": course_title,
+            "credits": credits,
+            "include_in_sgpa": include_in_sgpa,
+            "is_english_or_elective": is_eng_el,
+            "internal_obtained": "Ab" if int_ab else int_sc,
+            "internal_max": ia_max,
+            "internal_pass": ia_pass,
+            "external_obtained": "Ab" if ex_ab else ex_sc,
+            "external_max": ea_max,
+            "external_pass": ea_pass,
+            "grace_marks": course_grace,
+            "total_obtained": "Ab" if is_absent else total_obtained,
+            "total_max": total_max,
+            "percentage": percentage,
+            "letter_grade": letter_grade,
+            "grade_point": grade_point,
+            "credit_points": credit_points,
+            "is_pass": course_is_pass,
+            "is_absent": is_absent,
+            "is_exempted": is_exempt,
+        }
+
+    # 4. Semester Summary Metrics
+    numeric_totals = [c["total_obtained"] for c in evaluated_courses.values() if isinstance(c["total_obtained"], (int, float))]
+    grand_total_obtained = round(sum(numeric_totals), 2)
+    grand_total_max = round(sum(c["total_max"] for c in evaluated_courses.values()), 2)
+    overall_percentage = round((grand_total_obtained / grand_total_max) * 100.0, 2) if grand_total_max > 0 else 0.0
+
+    statutory_credits = STATUTORY_SGPA_CREDITS.get(sem_num, sem_def.sgpa_eligible_credits if sem_def else 1)
+    total_credit_score = round(sum(c["credit_points"] for c in evaluated_courses.values() if c["include_in_sgpa"]), 2)
+    sgpa = round(total_credit_score / max(statutory_credits, 1), 2)
+
+    total_grace = sum(c["grace_marks"] for c in evaluated_courses.values())
+    is_all_pass = (len(failed_courses) == 0)
+
+    if not is_all_pass:
+        result_status = "FAIL"
+    elif total_grace > 0:
+        g_courses = [c["course_title"] for c in evaluated_courses.values() if c["grace_marks"] > 0]
+        result_status = f"PASS WITH {format_grace_string(total_grace)} GRACE MARKS IN {' & '.join(g_courses)}"
+    else:
+        result_status = "PASS"
+
+    return SemesterEvaluationResult({
+        "roll_no": roll_no,
+        "enroll_no": enroll_no,
+        "student_name": student_name,
+        "father_name": father_name,
+        "semester_number": sem_num,
+        "courses": evaluated_courses,
+        "grand_total_obtained": grand_total_obtained,
+        "grand_total_max": grand_total_max,
+        "overall_percentage": overall_percentage,
+        "total_credit_score": total_credit_score,
+        "total_sgpa_credits": statutory_credits,
+        "sgpa": sgpa,
+        "result_status": result_status,
+        "is_pass": is_all_pass,
+        "failed_courses": failed_courses,
+        "backlog_queue": backlog_queue,
+        "total_grace": round(total_grace, 2),
+        "raw_remarks": raw_remarks or result_status,
+    })
+

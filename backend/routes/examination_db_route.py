@@ -12,6 +12,7 @@ VidyaLabs Copyright © 2026.
 """
 
 from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, File, UploadFile, Form, HTTPException, status, Query
 from sqlalchemy.orm import Session
 
@@ -21,6 +22,7 @@ from backend.db.repository import ExaminationRepository
 from backend.parsers.excel_parser import ExcelSheetParser
 from backend.parsers.exam_cell_parser import ExamCellParserAdapter
 from backend.evaluation_engine import EvaluationEngine
+from backend.security import require_subdean, require_authenticated, require_operator, require_viewer
 
 
 router = APIRouter(prefix="/api/v1", tags=["PostgreSQL Examination Persistence Engine"])
@@ -47,6 +49,7 @@ async def upload_examination_datasheet(
     sheet_name: Optional[str] = Form(None, description="Optional sheet name to parse"),
     attempt_number: Optional[int] = Form(None, description="Attempt number (0 for MAIN, 1 for REAPPEAR - I, etc.)"),
     attempt_label: Optional[str] = Form(None, description="Attempt label ('MAIN', 'REAPPEAR - I', 'REAPPEAR - II', etc.)"),
+    current_user: Any = Depends(require_operator),
 ):
     """
     Ingests an Excel examination datasheet, evaluates candidate component scores,
@@ -258,14 +261,16 @@ async def upload_examination_datasheet(
             # 3. Upsert Course Marks
             for comp in courses_list:
                 c_code = comp.course_code
-                db_course = repo.get_course_by_code(semester_number, c_code)
-                if not db_course:
-                    sem_courses = repo.get_semester_courses(semester_number)
-                    for sc in sem_courses:
-                        if any(w.lower() in sc.course_title.lower() for w in comp.course_title.split()[:2]):
-                            db_course = sc
-                            break
-
+                comp_name = getattr(comp, "component_name", None)
+                comp_title = getattr(comp, "course_title", None)
+                comp_cr = getattr(comp, "credits", None)
+                db_course = repo.resolve_course(
+                    semester_number=semester_number,
+                    course_code=c_code,
+                    component_name=comp_name,
+                    course_title=comp_title,
+                    credits=comp_cr
+                )
                 if not db_course:
                     continue
 
@@ -375,6 +380,7 @@ async def upload_examination_datasheet(
 def get_marksheet_by_roll_no(
     semester: int,
     roll_no: str,
+    current_user: Any = Depends(require_viewer),
 ):
     """
     Returns verified marksheet JSON data for a specific student and semester.
@@ -405,6 +411,7 @@ def get_marksheet_by_roll_no(
 def get_batch_marksheets(
     semester: int,
     batch_id: int,
+    current_user: Any = Depends(require_viewer),
 ):
     """
     Returns array of complete marksheet objects for all students in a batch cohort.
@@ -444,6 +451,7 @@ def get_batch_marksheets(
 def get_semester_analytics(
     semester: int,
     batch_id: Optional[int] = None,
+    current_user: Any = Depends(require_viewer),
 ):
     """
     Returns SQL-aggregated performance analytics:
@@ -480,7 +488,7 @@ def get_semester_analytics(
 # -----------------------------------------------------------------------------
 
 @router.get("/batches")
-def list_batches():
+def list_batches(current_user: Any = Depends(require_viewer)):
     """Lists all registered student cohorts / batches."""
     with get_sync_session() as session:
         batches = session.query(Batch).order_by(Batch.id).all()
@@ -498,7 +506,10 @@ def list_batches():
 
 
 @router.get("/students")
-def list_students(batch_id: Optional[int] = Query(None)):
+def list_students(
+    batch_id: Optional[int] = Query(None),
+    current_user: Any = Depends(require_viewer),
+):
     """Lists students, optionally filtered by cohort batch ID."""
     with get_sync_session() as session:
         q = session.query(Student).filter(Student.is_active == True)
@@ -548,3 +559,53 @@ def get_student_audit_trail(roll_no: str):
             }
             for l in logs
         ]
+
+
+# -----------------------------------------------------------------------------
+# 7. Final Delivery Lifecycle Route (SubDean / Admin Authority)
+# -----------------------------------------------------------------------------
+
+class MarkAsFinalRequest(BaseModel):
+    semester: int = Field(..., ge=1, le=8, description="Target Semester (1-8)")
+    roll_numbers: List[str] = Field(default_factory=list, description="Target student roll numbers")
+    delivered_by: Optional[str] = Field("Sub-Dean Examinations", description="Official delivering authority")
+
+
+@router.post("/marksheets/mark-as-final")
+def mark_marksheets_as_final(
+    payload: MarkAsFinalRequest,
+    current_user: Any = Depends(require_subdean),
+):
+    """
+    Institutional Delivery State Transition:
+    Marks specified student semester registrations as FINAL copy delivered.
+    Protected by RBAC: Requires 'SubDean' or 'Admin' role.
+    """
+    from datetime import datetime, timezone
+    from backend.db.models import Student, StudentSemesterRegistration
+
+    with get_sync_session() as session:
+        now_utc = datetime.now(timezone.utc)
+        q = (
+            session.query(StudentSemesterRegistration)
+            .join(Student, StudentSemesterRegistration.student_id == Student.id)
+            .filter(StudentSemesterRegistration.semester_number == payload.semester)
+        )
+        if payload.roll_numbers:
+            q = q.filter(Student.roll_no.in_(payload.roll_numbers))
+
+        records = q.all()
+        for reg in records:
+            reg.delivery_status = "FINAL"
+            reg.delivered_at = now_utc
+            reg.delivered_by = payload.delivered_by or getattr(current_user, "full_name", "Sub-Dean Examinations")
+        session.commit()
+
+        return {
+            "success": True,
+            "message": f"Successfully marked {len(records)} marksheets as FINAL.",
+            "total_updated": len(records),
+            "delivered_at": now_utc.isoformat(),
+            "delivered_by": payload.delivered_by or getattr(current_user, "full_name", "Sub-Dean Examinations")
+        }
+

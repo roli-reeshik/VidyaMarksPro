@@ -163,3 +163,25 @@ def compute_sgpa(course_evaluations: list[dict]) -> Tuple[float, float, int]:
 
     sgpa = round(total_credit_points / total_credits, 2)
     return sgpa, round(total_credit_points, 2), total_credits
+
+
+STATUTORY_SGPA_CREDITS = {
+    1: 12,
+    2: 31,
+    3: 17,
+    4: 21,
+    5: 11,
+    6: 21,
+    7: 26,
+    8: 12,
+}
+
+
+def evaluate_student_semester(*args, **kwargs):
+    """
+    Standardized In-App Re-Calculation Pipeline for B.Sc. Nursing Semesters 1 to 8.
+    Delegates to backend.evaluation_engine.evaluate_student_semester.
+    """
+    from backend.evaluation_engine import evaluate_student_semester as _eval
+    return _eval(*args, **kwargs)
+

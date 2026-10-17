@@ -21,8 +21,10 @@ from sqlalchemy import (
     ForeignKey,
     UniqueConstraint,
     Index,
+    CheckConstraint,
     func,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
 from backend.db.database import Base
@@ -69,6 +71,9 @@ class Student(Base):
         uselist=False,
         cascade="all, delete-orphan",
     )
+    backlogs = relationship(
+        "StudentBacklog", back_populates="student", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:
         return f"<Student(id={self.id}, roll_no='{self.roll_no}', name='{self.student_name}')>"
@@ -98,6 +103,7 @@ class Course(Base):
 
     # Relationships
     marks = relationship("StudentCourseMark", back_populates="course")
+    backlogs = relationship("StudentBacklog", back_populates="course")
 
     def __repr__(self) -> str:
         return f"<Course(id={self.id}, sem={self.semester_number}, code='{self.course_code}')>"
@@ -120,7 +126,7 @@ class StudentSemesterRegistration(Base):
     percentage = Column(Numeric(5, 2), nullable=True)
     credit_score = Column(Numeric(6, 2), nullable=True)
     sgpa = Column(Numeric(4, 2), nullable=True)
-    result_status = Column(String(50), nullable=True)  # 'PASS', 'PASS WITH GRACE', 'FAIL'
+    result_status = Column(String(255), nullable=True)  # 'PASS', 'PASS WITH GRACE', 'FAIL'
     result_remarks = Column(Text, nullable=True)
     grading_performance = Column(String(50), nullable=True)
     is_verified = Column(Boolean, default=False, nullable=False)
@@ -133,6 +139,8 @@ class StudentSemesterRegistration(Base):
     delivery_status = Column(String(20), default="PROVISIONAL", nullable=False)  # 'DRAFT', 'PROVISIONAL', 'FINAL'
     delivered_at = Column(DateTime(timezone=True), nullable=True)
     delivered_by = Column(String(100), nullable=True)
+    scrutiny_status = Column(String(30), default="PENDING", nullable=False)  # 'PENDING', 'FLAGGED', 'VERIFIED'
+    last_scrutinized_at = Column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("student_id", "semester_number", "exam_type", name="uq_reg_student_sem_type"),
@@ -246,6 +254,55 @@ class CumulativeAcademicSummary(Base):
         return f"<Summary(student_id={self.student_id}, cgpa={self.cgpa}, result='{self.final_result or self.overall_result}')>"
 
 
+class StudentBacklog(Base):
+    __tablename__ = "student_backlogs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
+    course_id = Column(Integer, ForeignKey("courses.id", ondelete="RESTRICT"), nullable=False, index=True)
+    original_registration_id = Column(
+        Integer, ForeignKey("student_semester_registrations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    failed_exam_month_year = Column(String(50), nullable=False)
+    forthcoming_exam_month_year = Column(String(50), nullable=True)
+    semester_number = Column(SmallInteger, nullable=False, index=True)
+    academic_year = Column(String(50), nullable=True)
+    failed_component = Column(String(50), nullable=True)  # 'THEORY', 'PRACTICAL', 'INTERNAL', 'EXTERNAL'
+    deficit_marks = Column(Numeric(5, 2), nullable=True)
+    attempt_count = Column(SmallInteger, default=1, nullable=False)
+    backlog_status = Column(String(20), default="ACTIVE", nullable=False)  # 'ACTIVE', 'CLEARED', 'DROPPED'
+    cleared_in_registration_id = Column(
+        Integer, ForeignKey("student_semester_registrations.id", ondelete="SET NULL"), nullable=True
+    )
+    cleared_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index(
+            "uq_active_student_backlog",
+            "student_id",
+            "course_id",
+            "backlog_status",
+            unique=True,
+            postgresql_where=(Column("backlog_status") == "ACTIVE"),
+        ),
+        Index("idx_backlogs_student_sem", "student_id", "semester_number"),
+    )
+
+    # Relationships
+    student = relationship("Student", back_populates="backlogs")
+    course = relationship("Course", back_populates="backlogs")
+    original_registration = relationship(
+        "StudentSemesterRegistration", foreign_keys=[original_registration_id]
+    )
+    cleared_registration = relationship(
+        "StudentSemesterRegistration", foreign_keys=[cleared_in_registration_id]
+    )
+
+    def __repr__(self) -> str:
+        return f"<Backlog(id={self.id}, student_id={self.student_id}, course_id={self.course_id}, status='{self.backlog_status}')>"
+
+
 class MarksAuditLog(Base):
     __tablename__ = "marks_audit_log"
 
@@ -288,4 +345,109 @@ class TemplateDesignAuditLog(Base):
 
     def __repr__(self) -> str:
         return f"<TemplateAudit(id={self.id}, sem={self.semester_number}, prop='{self.changed_property}')>"
+
+
+class AppUser(Base):
+    __tablename__ = "app_users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), unique=True, nullable=False, index=True)
+    full_name = Column(String(150), nullable=False)
+    email = Column(String(100), nullable=True)
+    hashed_password = Column(String(255), nullable=False)
+    role = Column(String(30), nullable=False)  # 'Admin', 'Sub-Dean', 'Scrutiny', 'Operator', 'Faculty', 'Viewer'
+    is_active = Column(Boolean, default=True, nullable=False)
+    must_change_password = Column(Boolean, default=True, nullable=False)
+    failed_login_attempts = Column(Integer, default=0, nullable=False)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
+    token_version = Column(Integer, default=1, nullable=False)
+    created_by = Column(String(50), default="Admin", nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<AppUser(id={self.id}, username='{self.username}', role='{self.role}')>"
+
+
+class AuthSecurityAuditLog(Base):
+    __tablename__ = "auth_security_audit_log"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    username = Column(String(50), nullable=True, index=True)
+    action = Column(String(50), nullable=False)  # 'LOGIN_SUCCESS', 'LOGIN_FAILED', 'LOCKED_OUT', 'PASSWORD_CHANGED', 'UNAUTHORIZED_ACCESS'
+    ip_address = Column(String(50), nullable=True)
+    user_agent = Column(Text, nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    __table_args__ = (
+        Index("idx_auth_audit_time", "timestamp"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<AuthAudit(id={self.id}, user='{self.username}', action='{self.action}', time='{self.timestamp}')>"
+
+
+class AppFeedback(Base):
+    __tablename__ = "app_feedback"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True, index=True)
+    username = Column(String(50), nullable=False, index=True)
+    user_role = Column(String(30), nullable=False, index=True)  # 'Admin', 'Sub-Dean', 'Scrutiny', 'Operator', 'Faculty', 'Viewer'
+    category = Column(String(50), nullable=False, index=True)   # 'UI/UX Improvement', 'Calculation/Grading Discrepancy', 'Feature Request', 'Bug/Defect', 'General Feedback'
+    subject = Column(String(200), nullable=False)
+    feedback_text = Column(Text, nullable=False)
+    rating = Column(SmallInteger, nullable=False)
+    status = Column(String(20), default="NEW", nullable=False, index=True)  # 'NEW', 'UNDER_REVIEW', 'RESOLVED', 'ARCHIVED'
+    admin_notes = Column(Text, nullable=True)
+    submitted_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("rating >= 1 AND rating <= 5", name="ck_feedback_rating"),
+        Index("idx_feedback_status_cat", "status", "category"),
+    )
+
+    # Relationship
+    user = relationship("AppUser", foreign_keys=[user_id])
+
+    def __repr__(self) -> str:
+        return f"<AppFeedback(id={self.id}, user='{self.username}', cat='{self.category}', status='{self.status}')>"
+
+
+class ScrutinyVerification(Base):
+    __tablename__ = "scrutiny_verifications"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    registration_id = Column(
+        Integer, ForeignKey("student_semester_registrations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    student_id = Column(Integer, ForeignKey("students.id", ondelete="CASCADE"), nullable=False, index=True)
+    semester_number = Column(Integer, nullable=False, index=True)
+    scrutiny_user_id = Column(Integer, ForeignKey("app_users.id", ondelete="SET NULL"), nullable=True)
+    scrutiny_username = Column(String(50), nullable=False, index=True)
+    verification_status = Column(String(30), nullable=False)  # 'VERIFIED_CORRECT', 'NEEDS_CORRECTION', 'PENDING'
+    comments = Column(Text, nullable=True)
+    highlighted_fields = Column(JSONB, default=list, nullable=False)
+    suggested_changes = Column(JSONB, default=dict, nullable=False)
+    iteration_number = Column(Integer, default=1, nullable=False)
+    verified_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    is_actioned_by_admin = Column(Boolean, default=False, nullable=False, index=True)
+    actioned_by_admin_username = Column(String(50), nullable=True)
+    actioned_at = Column(DateTime(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_scrutiny_reg_iter", "registration_id", "iteration_number"),
+        Index("idx_scrutiny_actioned", "is_actioned_by_admin"),
+    )
+
+    # Relationships
+    registration = relationship("StudentSemesterRegistration", backref="scrutiny_records")
+    student = relationship("Student", backref="scrutiny_records")
+    scrutiny_user = relationship("AppUser", foreign_keys=[scrutiny_user_id])
+
+    def __repr__(self) -> str:
+        return f"<ScrutinyVerification(id={self.id}, reg_id={self.registration_id}, status='{self.verification_status}', iter={self.iteration_number})>"
+
+
 

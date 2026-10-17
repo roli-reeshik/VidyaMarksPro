@@ -340,8 +340,8 @@ SEMESTER_DEFINITIONS: Dict[int, SemesterDefinition] = {
         year=2,
         semester_name="FOURTH SEMESTER",
         year_name="SECOND YEAR",
-        total_prescribed_credits=21,
-        sgpa_eligible_credits=20,
+        total_prescribed_credits=22,
+        sgpa_eligible_credits=21,
         grand_total_marks=350.0,
         courses=[
             CourseDefinition(
@@ -365,7 +365,8 @@ SEMESTER_DEFINITIONS: Dict[int, SemesterDefinition] = {
                         min_pass_percentage=50.0,
                         sub_components=[
                             SubComponentDefinition(name="Pharmacology (I & II)", code="PHAR 205", max_marks=38.0),
-                            SubComponentDefinition(name="Pathology (I & II) & Genetics", code="PATH 210", max_marks=37.0),
+                            SubComponentDefinition(name="Pathology (I & II)", code="PATH 210", max_marks=25.0),
+                            SubComponentDefinition(name="Genetics", code="GEN 215", max_marks=12.0),
                         ]
                     )
                 ]
@@ -710,7 +711,11 @@ SEMESTER_DEFINITIONS: Dict[int, SemesterDefinition] = {
                         ia_max=25.0,
                         ea_max=75.0,
                         total_max=100.0,
-                        min_pass_percentage=50.0
+                        min_pass_percentage=50.0,
+                        sub_components=[
+                            SubComponentDefinition(name="Nursing Research", code="NRST 405 (NUR)", max_marks=55.0),
+                            SubComponentDefinition(name="Statistics", code="NRST 405 (STAT)", max_marks=20.0),
+                        ]
                     )
                 ]
             ),
@@ -754,7 +759,7 @@ SEMESTER_DEFINITIONS: Dict[int, SemesterDefinition] = {
         year_name="FOURTH YEAR",
         total_prescribed_credits=13,
         sgpa_eligible_credits=12,
-        grand_total_marks=300.0,
+        grand_total_marks=200.0,
         courses=[
             CourseDefinition(
                 sl_no=1,

@@ -8,8 +8,10 @@ from fastapi.testclient import TestClient
 from backend.main import app
 from backend.parsers.template_generator import generate_semester_template
 from backend.parsers.excel_parser import ExcelSheetParser
+from backend.security import create_access_token
 
 client = TestClient(app)
+admin_headers = {"Authorization": f"Bearer {create_access_token({'sub': 'Admin', 'role': 'Admin', 'token_version': 1})}"}
 
 
 def test_metadata_endpoint():
@@ -106,7 +108,8 @@ def test_api_upload_endpoint():
     response = client.post(
         "/api/upload",
         files={"file": file_payload},
-        data={"semester": "1"}
+        data={"semester": "1"},
+        headers=admin_headers,
     )
     assert response.status_code == 200
     data = response.json()

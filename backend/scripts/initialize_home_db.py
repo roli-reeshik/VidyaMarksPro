@@ -144,13 +144,22 @@ def main():
     run_longitudinal_migration()
     step_print("STAGE 3: MIGRATIONS", "Longitudinal & audit schema migration completed.")
 
+    step_print("STAGE 3: MIGRATIONS", "Running RBAC & auth schema migration (backend/scripts/migrate_auth_rbac.py)...")
+    from backend.scripts.migrate_auth_rbac import run_migration as run_auth_migration
+    run_auth_migration()
+    step_print("STAGE 3: MIGRATIONS", "RBAC & auth schema migration completed.")
+
     # -------------------------------------------------------------------------
     # STAGE 4: Data Seed / Initial Migration
     # -------------------------------------------------------------------------
     step_print("STAGE 4: DATA SEED", "Seeding default B.Sc. Nursing curriculum course catalog...")
-    from backend.db.init_db import seed_courses
+    from backend.db.init_db import seed_courses, seed_default_users
     seed_courses()
     step_print("STAGE 4: DATA SEED", "Course catalog seeded successfully.")
+
+    step_print("STAGE 4: DATA SEED", "Seeding default institutional RBAC user accounts...")
+    seed_default_users()
+    step_print("STAGE 4: DATA SEED", "Institutional user accounts verified/seeded.")
 
     excel_file = os.path.join(BASE_DIR, "VidyaMarksheet_Master_DataSheet.xlsx")
     if os.path.exists(excel_file):
@@ -189,6 +198,9 @@ def main():
         # Count cumulative summaries
         summary_count = conn.execute(text("SELECT COUNT(*) FROM cumulative_academic_summary;")).scalar() or 0
 
+        # Count users
+        user_count = conn.execute(text("SELECT COUNT(*) FROM app_users;")).scalar() or 0
+
     expected_tables = {
         "batches",
         "students",
@@ -198,6 +210,8 @@ def main():
         "cumulative_academic_summary",
         "marks_audit_log",
         "template_design_audit_log",
+        "app_users",
+        "auth_security_audit_log",
     }
     missing_tables = expected_tables - set(verified_tables)
     is_healthy = len(missing_tables) == 0 and course_count > 0
@@ -217,6 +231,7 @@ def main():
     for t in sorted(verified_tables):
         print(f"   • {t:<34} | {'[VERIFIED]':<38} ")
     print(f" {'Total Courses Seeded (Sem 1-8)':<36} | {course_count:<38} ")
+    print(f" {'Institutional Users Seeded':<36} | {user_count:<38} ")
     print(f" {'Initial Students Ingested':<36} | {student_count:<38} ")
     print(f" {'Semester Registrations':<36} | {reg_count:<38} ")
     print(f" {'Course Marks Recorded':<36} | {marks_count:<38} ")

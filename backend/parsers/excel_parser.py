@@ -11,7 +11,12 @@ import openpyxl
 import pandas as pd
 
 from backend.grading import calculate_inc_grade, compute_sgpa
-from backend.parsers.exam_cell_parser import unmerge_and_replicate_cells
+from backend.parsers.exam_cell_parser import (
+    unmerge_and_replicate_cells,
+    robust_load_workbook,
+    clean_excel_filters_xml,
+    patch_openpyxl_filters,
+)
 from backend.schemas.course_schemas import (
     SEMESTER_DEFINITIONS,
     SemesterDefinition,
@@ -79,11 +84,26 @@ def parse_numeric_with_grace(val: Any) -> Tuple[Optional[float], float, bool]:
         return None, 0.0, False
 
 
+def compute_pure_total(internal_obtd: Optional[float], external_obtd: Optional[float], course_grace: float = 0.0) -> Optional[float]:
+    """
+    Ingestion Isolation Rule:
+    Strictly calculates total marks from raw components (IA + EA + Grace).
+    Never trusts pre-calculated Excel sheet totals.
+    """
+    if internal_obtd is None and external_obtd is None:
+        return None
+    return round((internal_obtd or 0.0) + (external_obtd or 0.0) + (course_grace or 0.0), 2)
+
+
 def detect_semester_from_text(text: str) -> Optional[int]:
     """Detects semester number (1-8) from sheet text, sheet names, or filenames."""
     t = text.lower()
 
     # 1. Distinct course codes and subjects first (unambiguous across semesters)
+    if any(k in t for k in ['inte 415', 'inte - 415', 'intensive clinical', 'competency assessment', 'elective-3', 'scientific writing']):
+        return 8
+    if any(k in t for k in ['midw/obgn', 'midw', 'obgn', 'nrst 405', 'nrst', 'nursing research & statistics', 'nursing research and statistics', 'n-comh (ii)', 'comh (ii)', 'comh-ii']):
+        return 7
     if any(k in t for k in ['child health', 'n-chn', 'n-mhn', 'nmle 330', 'nmle', 'mental health nursing']):
         return 6
     if any(k in t for k in ['community health', 'n-comh', 'n-educ', 'educ 315', 'n-forn', 'forn 320', 'forensic nursing', 'educational technology']):
@@ -94,7 +114,7 @@ def detect_semester_from_text(text: str) -> Optional[int]:
         return 3
     if any(k in t for k in ['bioc 135', 'nutr 140', 'biochemistry', 'n-nf', 'hnit 145', 'hnit']):
         return 2
-    if any(k in t for k in ['anat 105', 'phys 110', 'soci 115', 'psyc 120', 'engl 101', 'communicative english']):
+    if any(k in t for k in ['anat', 'phys', 'soci', 'psyc', 'engl', 'anatomy', 'physiology', 'sociology', 'psychology', 'communicative english']):
         return 1
 
     # 2. Standard semester keywords
@@ -142,7 +162,7 @@ class ExcelSheetParser:
         self.warnings: List[str] = []
 
     def parse(self) -> IngestionResponse:
-        wb = openpyxl.load_workbook(io.BytesIO(self.file_content), data_only=True)
+        wb = robust_load_workbook(self.file_content, data_only=True)
         if self.sheet_name and self.sheet_name in wb.sheetnames:
             sheet = wb[self.sheet_name]
         else:
@@ -365,10 +385,7 @@ class ExcelSheetParser:
                     elif v_ext_tot is not None:
                         external_obtd = v_ext_tot
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 13  # Next course starts around col 13 in DataSheet
 
@@ -392,10 +409,7 @@ class ExcelSheetParser:
                     elif v_ext_tot is not None:
                         external_obtd = v_ext_tot
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 20
 
@@ -409,91 +423,139 @@ class ExcelSheetParser:
                     is_absent = ab_int or ab_ex
 
                     tot_cell, _, _ = parse_numeric_with_grace(sheet.cell(row_idx, 22).value)
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                 elif sem_def.semester_number == 2 and course.course_code == "BIOC 135 & NUTR 140":
-                    # Col 6: Int (25), Col 7: BIOC Ex (25), Col 8: NUTR Ex (50), Col 9: Total Ex (75), Col 10: Total (100)
-                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 6).value)
-                    v_bioc, g_bioc, ab_bioc = parse_numeric_with_grace(sheet.cell(row_idx, 7).value)
-                    v_nutr, g_nutr, ab_nutr = parse_numeric_with_grace(sheet.cell(row_idx, 8).value)
-                    v_ext_tot, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 9).value)
-                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 10).value)
+                    # Check if master tabulation layout (Int at 6, Univ Ex at 7, Grace at 8, Total at 9)
+                    is_master_layout = False
+                    for hr in range(4, 7):
+                        c8_val = clean_str(sheet.cell(hr, 8).value).lower()
+                        c7_val = clean_str(sheet.cell(hr, 7).value).lower()
+                        if "grace" in c8_val or ("univ" in c7_val and "75" in c7_val):
+                            is_master_layout = True
+                            break
 
-                    internal_obtd = v_int
-                    course_grace = g_int + g_bioc + g_nutr + g_ext + g_tot
-                    is_absent = ab_int or ab_bioc or ab_nutr or ab_ext
+                    if is_master_layout:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 6).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 7).value)
+                        v_gr, _, _ = parse_numeric_with_grace(sheet.cell(row_idx, 8).value)
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 9).value)
 
-                    sub_marks.append(SubComponentMark(name="Applied Biochemistry", code="BIOC 135", obtained=v_bioc, max_marks=25.0, is_absent=ab_bioc))
-                    sub_marks.append(SubComponentMark(name="Applied Nutrition & Dietetics", code="NUTR 140", obtained=v_nutr, max_marks=50.0, is_absent=ab_nutr))
+                        internal_obtd = v_int
+                        external_obtd = v_ext
+                        course_grace = g_int + g_ext + (v_gr or 0.0) + g_tot
+                        is_absent = ab_int or ab_ext
 
-                    if v_ext_tot is not None:
-                        external_obtd = v_ext_tot
-                    elif v_bioc is not None and v_nutr is not None:
-                        external_obtd = v_bioc + v_nutr
+                        total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+                    else:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 6).value)
+                        v_bioc, g_bioc, ab_bioc = parse_numeric_with_grace(sheet.cell(row_idx, 7).value)
+                        v_nutr, g_nutr, ab_nutr = parse_numeric_with_grace(sheet.cell(row_idx, 8).value)
+                        v_ext_tot, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 9).value)
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 10).value)
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                        internal_obtd = v_int
+                        course_grace = g_int + g_bioc + g_nutr + g_ext + g_tot
+                        is_absent = ab_int or ab_bioc or ab_nutr or ab_ext
 
-                    current_col = 13
+                        sub_marks.append(SubComponentMark(name="Applied Biochemistry", code="BIOC 135", obtained=v_bioc, max_marks=25.0, is_absent=ab_bioc))
+                        sub_marks.append(SubComponentMark(name="Applied Nutrition & Dietetics", code="NUTR 140", obtained=v_nutr, max_marks=50.0, is_absent=ab_nutr))
+
+                        if v_ext_tot is not None:
+                            external_obtd = v_ext_tot
+                        elif v_bioc is not None and v_nutr is not None:
+                            external_obtd = v_bioc + v_nutr
+
+                        total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 12
 
                 elif sem_def.semester_number == 2 and course.course_code == "N-NF (I & II) 125" and comp.name == "Theory":
-                    # Nursing Foundation Theory: Int (col 13), Univ Exam (col 14), Total (col 15)
-                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 13).value)
-                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 14).value)
-                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 15).value)
+                    is_master_layout = False
+                    for hr in range(4, 7):
+                        c14_val = clean_str(sheet.cell(hr, 14).value).lower()
+                        c8_val = clean_str(sheet.cell(hr, 8).value).lower()
+                        if "grace" in c14_val or "grace" in c8_val:
+                            is_master_layout = True
+                            break
+
+                    if is_master_layout:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 12).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 13).value)
+                        v_gr, _, _ = parse_numeric_with_grace(sheet.cell(row_idx, 14).value)
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 15).value)
+                    else:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 13).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 14).value)
+                        v_gr = 0.0
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 15).value)
 
                     internal_obtd = v_int
                     external_obtd = v_ext
-                    course_grace = g_int + g_ext + g_tot
+                    course_grace = g_int + g_ext + (v_gr or 0.0) + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 18
 
                 elif sem_def.semester_number == 2 and course.course_code == "N-NF (I & II) 125" and comp.name == "Practical":
-                    # Nursing Foundation Practical: Int (col 18), Univ Exam (col 19), Total (col 20)
-                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 18).value)
-                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 19).value)
-                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 20).value)
+                    is_master_layout = False
+                    for hr in range(4, 7):
+                        c20_val = clean_str(sheet.cell(hr, 20).value).lower()
+                        c8_val = clean_str(sheet.cell(hr, 8).value).lower()
+                        if "grace" in c20_val or "grace" in c8_val:
+                            is_master_layout = True
+                            break
+
+                    if is_master_layout:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 18).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 19).value)
+                        v_gr, _, _ = parse_numeric_with_grace(sheet.cell(row_idx, 20).value)
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 21).value)
+                    else:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 18).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 19).value)
+                        v_gr = 0.0
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 20).value)
 
                     internal_obtd = v_int
                     external_obtd = v_ext
-                    course_grace = g_int + g_ext + g_tot
+                    course_grace = g_int + g_ext + (v_gr or 0.0) + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
-                    current_col = 23
+                    current_col = 24
 
                 elif sem_def.semester_number == 2 and (course.course_code == "HNIT 145" or "HNIT" in course.course_code):
-                    # Health/ Nursing Informatics & Technology: Int (col 23), College Exam (col 24), Total (col 25)
-                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 23).value)
-                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 24).value)
-                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 25).value)
+                    is_master_layout = False
+                    for hr in range(4, 7):
+                        c26_val = clean_str(sheet.cell(hr, 26).value).lower()
+                        c8_val = clean_str(sheet.cell(hr, 8).value).lower()
+                        if "grace" in c26_val or "grace" in c8_val:
+                            is_master_layout = True
+                            break
+
+                    if is_master_layout:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 24).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 25).value)
+                        v_gr, _, _ = parse_numeric_with_grace(sheet.cell(row_idx, 26).value)
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 27).value)
+                    else:
+                        v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 23).value)
+                        v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 24).value)
+                        v_gr = 0.0
+                        tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 25).value)
 
                     internal_obtd = v_int
                     external_obtd = v_ext
-                    course_grace = g_int + g_ext + g_tot
+                    course_grace = g_int + g_ext + (v_gr or 0.0) + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
-                    current_col = 28
+                    current_col = 30
 
                 # SEMESTER 3 COURSES
                 elif sem_def.semester_number == 3 and ("MICR" in course.course_code or "MICRO" in course.title.upper()):
@@ -544,10 +606,7 @@ class ExcelSheetParser:
                     elif v_micr is not None and v_infc is not None:
                         external_obtd = v_micr + v_infc
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 13
 
@@ -590,10 +649,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 18
 
@@ -636,10 +692,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 23
 
@@ -695,10 +748,7 @@ class ExcelSheetParser:
                     elif v_phar is not None and v_path is not None and v_gen is not None:
                         external_obtd = v_phar + v_path + v_gen
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 14
 
@@ -741,10 +791,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 19
 
@@ -787,10 +834,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 24
 
@@ -833,10 +877,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 29
 
@@ -885,10 +926,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 11
 
@@ -931,10 +969,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 16
 
@@ -977,10 +1012,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 21
 
@@ -1023,10 +1055,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 26
 
@@ -1070,10 +1099,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 11
 
@@ -1116,10 +1142,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 16
 
@@ -1162,10 +1185,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 21
 
@@ -1208,10 +1228,7 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 26
 
@@ -1254,16 +1271,287 @@ class ExcelSheetParser:
                     course_grace = g_int + g_ext + g_tot
                     is_absent = ab_int or ab_ext
 
-                    if tot_cell is not None:
-                        total_obtd = tot_cell
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col = 31
 
                 elif sem_def.semester_number == 6 and course.is_english_or_elective:
                     # Elective module - skip if not in sheet
                     if sheet.max_column < 36:
+                        continue
+
+                # SEMESTER 7 COURSES
+                elif sem_def.semester_number == 7 and ("COMH" in course.course_code or "COMMUNITY" in course.title.upper()) and comp.name == "Theory":
+                    # Community Health Nursing II Theory: Int (col 6), Ex (col 7), Total (col 8)
+                    if any(is_exempt_token(sheet.cell(row_idx, c).value) for c in [6, 7, 8]):
+                        eval_comp = EvaluatedCourseComponent(
+                            course_code=course.course_code,
+                            course_title=course.title,
+                            component_name=comp.name,
+                            credits=comp.credits or course.credits,
+                            credit_breakdown=course.credit_breakdown,
+                            internal_obtained=None,
+                            internal_max=comp.ia_max,
+                            external_obtained=None,
+                            external_max=comp.ea_max,
+                            total_obtained=None,
+                            total_max=comp.total_max,
+                            percentage=0.0,
+                            letter_grade="Ex.",
+                            grade_point=0,
+                            is_pass=True,
+                            grace_marks=0.0,
+                            is_absent=False,
+                            is_exempted=True,
+                            is_english_or_elective=course.is_english_or_elective,
+                            include_in_sgpa=False,
+                            footnotes=course.footnotes
+                        )
+                        eval_components.append(eval_comp)
+                        current_col = 11
+                        continue
+
+                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 6).value)
+                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 7).value)
+                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 8).value)
+
+                    internal_obtd = v_int
+                    external_obtd = v_ext
+                    course_grace = g_int + g_ext + g_tot
+                    is_absent = ab_int or ab_ext
+
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 11
+
+                elif sem_def.semester_number == 7 and ("NRST" in course.course_code or "RESEARCH" in course.title.upper()):
+                    # Nursing Research & Statistics: Int (col 11), NUR (col 12), STAT (col 13), Ex Tot (col 14), Total (col 15)
+                    if any(is_exempt_token(sheet.cell(row_idx, c).value) for c in [11, 12, 13, 14, 15]):
+                        eval_comp = EvaluatedCourseComponent(
+                            course_code=course.course_code,
+                            course_title=course.title,
+                            component_name=comp.name,
+                            credits=comp.credits or course.credits,
+                            credit_breakdown=course.credit_breakdown,
+                            internal_obtained=None,
+                            internal_max=comp.ia_max,
+                            external_obtained=None,
+                            external_max=comp.ea_max,
+                            total_obtained=None,
+                            total_max=comp.total_max,
+                            percentage=0.0,
+                            letter_grade="Ex.",
+                            grade_point=0,
+                            is_pass=True,
+                            grace_marks=0.0,
+                            is_absent=False,
+                            is_exempted=True,
+                            is_english_or_elective=course.is_english_or_elective,
+                            include_in_sgpa=False,
+                            footnotes=course.footnotes
+                        )
+                        eval_components.append(eval_comp)
+                        current_col = 18
+                        continue
+
+                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 11).value)
+                    v_nur, g_nur, ab_nur = parse_numeric_with_grace(sheet.cell(row_idx, 12).value)
+                    v_stat, g_stat, ab_stat = parse_numeric_with_grace(sheet.cell(row_idx, 13).value)
+                    v_ext_tot, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 14).value)
+                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 15).value)
+
+                    internal_obtd = v_int
+                    course_grace = g_int + g_nur + g_stat + g_ext + g_tot
+                    is_absent = ab_int or ab_nur or ab_stat or ab_ext
+
+                    sub_marks.append(SubComponentMark(name="Nursing Research", code="NRST 405 (NUR)", obtained=v_nur, max_marks=55.0, is_absent=ab_nur))
+                    sub_marks.append(SubComponentMark(name="Statistics", code="NRST 405 (STAT)", obtained=v_stat, max_marks=20.0, is_absent=ab_stat))
+
+                    if v_ext_tot is not None:
+                        external_obtd = v_ext_tot
+                    elif v_nur is not None and v_stat is not None:
+                        external_obtd = v_nur + v_stat
+
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 18
+
+                elif sem_def.semester_number == 7 and ("MIDW" in course.course_code or "OBGN" in course.course_code or "OBG" in course.title.upper()) and comp.name == "Theory":
+                    # Midwifery/OBG Nursing Theory: Int (col 18), Ex (col 19), Total (col 20)
+                    if any(is_exempt_token(sheet.cell(row_idx, c).value) for c in [18, 19, 20]):
+                        eval_comp = EvaluatedCourseComponent(
+                            course_code=course.course_code,
+                            course_title=course.title,
+                            component_name=comp.name,
+                            credits=comp.credits or course.credits,
+                            credit_breakdown=course.credit_breakdown,
+                            internal_obtained=None,
+                            internal_max=comp.ia_max,
+                            external_obtained=None,
+                            external_max=comp.ea_max,
+                            total_obtained=None,
+                            total_max=comp.total_max,
+                            percentage=0.0,
+                            letter_grade="Ex.",
+                            grade_point=0,
+                            is_pass=True,
+                            grace_marks=0.0,
+                            is_absent=False,
+                            is_exempted=True,
+                            is_english_or_elective=course.is_english_or_elective,
+                            include_in_sgpa=False,
+                            footnotes=course.footnotes
+                        )
+                        eval_components.append(eval_comp)
+                        current_col = 23
+                        continue
+
+                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 18).value)
+                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 19).value)
+                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 20).value)
+
+                    internal_obtd = v_int
+                    external_obtd = v_ext
+                    course_grace = g_int + g_ext + g_tot
+                    is_absent = ab_int or ab_ext
+
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 23
+
+                elif sem_def.semester_number == 7 and ("MIDW" in course.course_code or "OBGN" in course.course_code or "OBG" in course.title.upper()) and comp.name == "Practical":
+                    # Midwifery/OBG Nursing Practical: Int (col 23), Ex (col 24), Total (col 25)
+                    if any(is_exempt_token(sheet.cell(row_idx, c).value) for c in [23, 24, 25]):
+                        eval_comp = EvaluatedCourseComponent(
+                            course_code=course.course_code,
+                            course_title=course.title,
+                            component_name=comp.name,
+                            credits=comp.credits or course.credits,
+                            credit_breakdown=course.credit_breakdown,
+                            internal_obtained=None,
+                            internal_max=comp.ia_max,
+                            external_obtained=None,
+                            external_max=comp.ea_max,
+                            total_obtained=None,
+                            total_max=comp.total_max,
+                            percentage=0.0,
+                            letter_grade="Ex.",
+                            grade_point=0,
+                            is_pass=True,
+                            grace_marks=0.0,
+                            is_absent=False,
+                            is_exempted=True,
+                            is_english_or_elective=course.is_english_or_elective,
+                            include_in_sgpa=False,
+                            footnotes=course.footnotes
+                        )
+                        eval_components.append(eval_comp)
+                        current_col = 28
+                        continue
+
+                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 23).value)
+                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 24).value)
+                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 25).value)
+
+                    internal_obtd = v_int
+                    external_obtd = v_ext
+                    course_grace = g_int + g_ext + g_tot
+                    is_absent = ab_int or ab_ext
+
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 28
+
+                elif sem_def.semester_number == 7 and ("COMH" in course.course_code or "COMMUNITY" in course.title.upper()) and comp.name == "Practical":
+                    # Community Health Nursing II Practical: Int (col 28), Ex (col 29), Total (col 30)
+                    if any(is_exempt_token(sheet.cell(row_idx, c).value) for c in [28, 29, 30]):
+                        eval_comp = EvaluatedCourseComponent(
+                            course_code=course.course_code,
+                            course_title=course.title,
+                            component_name=comp.name,
+                            credits=comp.credits or course.credits,
+                            credit_breakdown=course.credit_breakdown,
+                            internal_obtained=None,
+                            internal_max=comp.ia_max,
+                            external_obtained=None,
+                            external_max=comp.ea_max,
+                            total_obtained=None,
+                            total_max=comp.total_max,
+                            percentage=0.0,
+                            letter_grade="Ex.",
+                            grade_point=0,
+                            is_pass=True,
+                            grace_marks=0.0,
+                            is_absent=False,
+                            is_exempted=True,
+                            is_english_or_elective=course.is_english_or_elective,
+                            include_in_sgpa=False,
+                            footnotes=course.footnotes
+                        )
+                        eval_components.append(eval_comp)
+                        current_col = 33
+                        continue
+
+                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 28).value)
+                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 29).value)
+                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 30).value)
+
+                    internal_obtd = v_int
+                    external_obtd = v_ext
+                    course_grace = g_int + g_ext + g_tot
+                    is_absent = ab_int or ab_ext
+
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 33
+
+                # SEMESTER 8 COURSES
+                elif sem_def.semester_number == 8 and ("INTE" in course.course_code or "COMPETENCY" in course.title.upper() or "CLINICAL" in course.title.upper()):
+                    # Competency Assessment: Int (col 6), Ex (col 7), Total (col 8)
+                    if any(is_exempt_token(sheet.cell(row_idx, c).value) for c in [6, 7, 8]):
+                        eval_comp = EvaluatedCourseComponent(
+                            course_code=course.course_code,
+                            course_title=course.title,
+                            component_name=comp.name,
+                            credits=comp.credits or course.credits,
+                            credit_breakdown=course.credit_breakdown,
+                            internal_obtained=None,
+                            internal_max=comp.ia_max,
+                            external_obtained=None,
+                            external_max=comp.ea_max,
+                            total_obtained=None,
+                            total_max=comp.total_max,
+                            percentage=0.0,
+                            letter_grade="Ex.",
+                            grade_point=0,
+                            is_pass=True,
+                            grace_marks=0.0,
+                            is_absent=False,
+                            is_exempted=True,
+                            is_english_or_elective=course.is_english_or_elective,
+                            include_in_sgpa=False,
+                            footnotes=course.footnotes
+                        )
+                        eval_components.append(eval_comp)
+                        current_col = 11
+                        continue
+
+                    v_int, g_int, ab_int = parse_numeric_with_grace(sheet.cell(row_idx, 6).value)
+                    v_ext, g_ext, ab_ext = parse_numeric_with_grace(sheet.cell(row_idx, 7).value)
+                    tot_cell, g_tot, _ = parse_numeric_with_grace(sheet.cell(row_idx, 8).value)
+
+                    internal_obtd = v_int
+                    external_obtd = v_ext
+                    course_grace = g_int + g_ext + g_tot
+                    is_absent = ab_int or ab_ext
+
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
+
+                    current_col = 11
+
+                elif sem_def.semester_number == 8 and course.is_english_or_elective:
+                    # Elective module - skip if not in sheet
+                    if sheet.max_column < 15:
                         continue
 
                 else:
@@ -1277,14 +1565,7 @@ class ExcelSheetParser:
                     course_grace = g_ia + g_ea + g_tot
                     is_absent = ab_ia or ab_ea
 
-                    if v_tot is not None:
-                        total_obtd = v_tot
-                    elif internal_obtd is not None and external_obtd is not None:
-                        total_obtd = internal_obtd + external_obtd
-                    elif internal_obtd is not None:
-                        total_obtd = internal_obtd
-                    elif external_obtd is not None:
-                        total_obtd = external_obtd
+                    total_obtd = compute_pure_total(internal_obtd, external_obtd, course_grace)
 
                     current_col += 3
 

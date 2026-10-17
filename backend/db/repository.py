@@ -5,6 +5,7 @@ and SGPGIMS Lucknow Regulations (College Code: 1313).
 VidyaLabs Copyright © 2026.
 """
 
+import re
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, Any, List, Optional, Tuple
@@ -19,6 +20,7 @@ from backend.db.models import (
     StudentCourseMark,
     CumulativeAcademicSummary,
     MarksAuditLog,
+    StudentBacklog,
 )
 from backend.grading import calculate_inc_grade
 
@@ -145,9 +147,72 @@ class ExaminationRepository:
     # Course Catalog Operations
     # -------------------------------------------------------------------------
 
-    def get_course_by_code(self, semester_number: int, course_code: str) -> Optional[Course]:
-        """Resolves course by exact code, fuzzy code, or canonical acronym for a semester."""
-        code_clean = course_code.strip()
+    def resolve_course(
+        self,
+        semester_number: int,
+        course_code: str,
+        component_name: Optional[str] = None,
+        course_title: Optional[str] = None,
+        credits: Optional[float] = None,
+    ) -> Optional[Course]:
+        """
+        Robustly resolves course from PostgreSQL catalog across all 8 semesters.
+        Distinguishes Theory (T) and Practical (P) lines for multi-component subjects:
+        - Sem 2: N-NF (I & II) 125 (T) [12 Cr] vs (P) [11 Cr]
+        - Sem 3: N-AHN (I) 215 (T) [7 Cr] vs (P) [7 Cr]
+        - Sem 4: N-AHN (II) 225 (T) [7 Cr] vs (P) [7 Cr]
+        - Sem 5: N-COMH (I) 310 (T) [5 Cr] vs (P) [2 Cr]
+        - Sem 6: N-CHN (I & II) 301 (T) [5 Cr] vs (P) [4 Cr]; N-MHN (I & II) 305 (T) [5 Cr] vs (P) [3 Cr]
+        - Sem 7: N-COMH (II) 401 (T) [5 Cr] vs (P) [2 Cr]; N-MIDW/OBGN (T) [8 Cr] vs (P) [7 Cr]
+        """
+        code_clean = str(course_code or "").strip()
+        comp_clean = str(component_name or "").strip()
+        title_clean = str(course_title or "").strip()
+
+        # Determine if this component represents Practical or Theory
+        is_pract = None
+        # 1. From component_name (most explicit from Excel parser: "Theory" vs "Practical")
+        if comp_clean:
+            if any(p in comp_clean.upper() for p in ["PRACT", "(P)", "_P"]):
+                is_pract = True
+            elif any(t in comp_clean.upper() for t in ["THEOR", "(T)", "_T"]):
+                is_pract = False
+
+        # 2. From course_code if not yet determined
+        if is_pract is None and code_clean:
+            if any(p in code_clean.upper() for p in ["(P)", "_P", "PRACT"]):
+                is_pract = True
+            elif any(t in code_clean.upper() for t in ["(T)", "_T", "THEOR"]):
+                is_pract = False
+
+        # 3. From course_title if not yet determined
+        if is_pract is None and title_clean:
+            if any(p in title_clean.upper() for p in ["PRACTICAL", "(P)"]):
+                is_pract = True
+            elif any(t in title_clean.upper() for t in ["THEORY", "(T)"]):
+                is_pract = False
+
+        # 4. From credits for known semester credit splits
+        if is_pract is None and credits is not None:
+            c_val = float(credits)
+            if semester_number == 2 and c_val == 11.0:
+                is_pract = True
+            elif semester_number == 2 and c_val == 12.0:
+                is_pract = False
+            elif semester_number == 5 and c_val == 2.0:
+                is_pract = True
+            elif semester_number == 5 and c_val == 5.0:
+                is_pract = False
+            elif semester_number == 6 and c_val in [3.0, 4.0]:
+                is_pract = True
+            elif semester_number == 6 and c_val == 5.0:
+                is_pract = False
+            elif semester_number == 7 and c_val in [2.0, 7.0]:
+                is_pract = True
+            elif semester_number == 7 and c_val in [5.0, 8.0]:
+                is_pract = False
+
+        # Exact match attempt first
         course = (
             self.session.query(Course)
             .filter(
@@ -156,80 +221,109 @@ class ExaminationRepository:
             )
             .first()
         )
-        if not course:
-            # Fuzzy match (e.g., handles '(T)', '(P)' prefixes or slight space differences)
-            course = (
-                self.session.query(Course)
-                .filter(
-                    Course.semester_number == semester_number,
-                    Course.course_code.ilike(f"%{code_clean}%"),
-                )
-                .first()
-            )
-        if not course:
-            # Canonical token matching
-            upper = code_clean.upper()
-            sem_courses = self.get_semester_courses(semester_number)
+        if course:
+            # If the exact match doesn't conflict with is_pract, return it
+            if is_pract is None or (is_pract and course.is_practical) or (not is_pract and course.is_theory):
+                return course
+
+        # If not exact match, get all courses for the semester
+        sem_courses = self.get_semester_courses(semester_number)
+
+        # Filter candidate courses by practical/theory flag if determined
+        if is_pract is True:
+            candidates = [c for c in sem_courses if c.is_practical]
+        elif is_pract is False:
+            candidates = [c for c in sem_courses if c.is_theory]
+        else:
+            candidates = sem_courses
+
+        upper_code = code_clean.upper()
+
+        # Token matching against candidates
+        for sc in candidates:
+            sc_code_up = sc.course_code.upper()
+            sc_title_up = sc.course_title.upper()
+
+            # Direct substring in course_code
+            if code_clean and code_clean.lower() in sc.course_code.lower():
+                return sc
+
+            # Subject token clusters
+            if "ENGL" in upper_code and "ENGL" in sc_code_up:
+                return sc
+            if ("ANAT" in upper_code or "PHYS" in upper_code) and ("ANAT" in sc_code_up or "PHYS" in sc_code_up):
+                return sc
+            if ("SOCI" in upper_code or "PSYC" in upper_code) and ("SOCI" in sc_code_up or "PSYC" in sc_code_up):
+                return sc
+            if ("BIOC" in upper_code or "NUTR" in upper_code) and ("BIOC" in sc_code_up or "NUTR" in sc_code_up):
+                return sc
+            if ("HNIT" in upper_code or "INFORMATICS" in upper_code) and ("HNIT" in sc_code_up or "INFORMATICS" in sc_title_up):
+                return sc
+            if ("NNF" in upper_code or "FOUNDATION" in upper_code or "N-NF" in upper_code or "125" in upper_code) and ("NNF" in sc_code_up or "N-NF" in sc_code_up or "FOUNDATION" in sc_title_up):
+                return sc
+            if "MICR" in upper_code and "MICR" in sc_code_up:
+                return sc
+            if "AHN" in upper_code and "AHN" in sc_code_up:
+                return sc
+            if ("PHAR" in upper_code or "PATH" in upper_code or "GEN" in upper_code) and ("PHAR" in sc_code_up or "PATH" in sc_code_up):
+                return sc
+            if "PROF" in upper_code and "PROF" in sc_code_up:
+                return sc
+            if "COMH" in upper_code and "COMH" in sc_code_up:
+                return sc
+            if "EDUC" in upper_code and "EDUC" in sc_code_up:
+                return sc
+            if "FORN" in upper_code and "FORN" in sc_code_up:
+                return sc
+            if "CHN" in upper_code and "CHN" in sc_code_up:
+                return sc
+            if "MHN" in upper_code and "MHN" in sc_code_up:
+                return sc
+            if "NMLE" in upper_code and "NMLE" in sc_code_up:
+                return sc
+            if "NRST" in upper_code and "NRST" in sc_code_up:
+                return sc
+            if ("MIDW" in upper_code or "OBGN" in upper_code) and ("MIDW" in sc_code_up or "OBGN" in sc_code_up):
+                return sc
+            if ("INTE" in upper_code or "COMPETENCY" in upper_code) and ("INTE" in sc_code_up or "COMPETENCY" in sc_title_up):
+                return sc
+            if "ELECTIVE" in upper_code and "ELECTIVE" in sc_code_up:
+                return sc
+
+            # Fallback by title words
+            if title_clean:
+                title_words = [w.lower() for w in title_clean.split() if len(w) > 3]
+                if any(w in sc.course_title.lower() for w in title_words[:2]):
+                    return sc
+
+        # If still not found and we filtered by is_pract, try without filter
+        if candidates != sem_courses:
             for sc in sem_courses:
-                sc_up = sc.course_code.upper()
-                sc_title_up = sc.course_title.upper()
-                if "ENGL" in upper and "ENGL" in sc_up:
+                if code_clean and code_clean.lower() in sc.course_code.lower():
                     return sc
-                if ("ANAT" in upper or "PHYS" in upper) and ("ANAT" in sc_up or "PHYS" in sc_up):
-                    return sc
-                if ("SOCI" in upper or "PSYC" in upper) and ("SOCI" in sc_up or "PSYC" in sc_up):
-                    return sc
-                if ("BIOC" in upper or "NUTR" in upper) and ("BIOC" in sc_up or "NUTR" in sc_up):
-                    return sc
-                if ("HNIT" in upper or "INFORMATICS" in upper) and ("HNIT" in sc_up or "INFORMATICS" in sc_title_up):
-                    return sc
-                if "NNF" in upper or "FOUNDATION" in upper or "N-NF" in upper:
-                    is_pract = "PRACT" in upper or "(P)" in upper or "_P" in upper
-                    sc_pract = "(P)" in sc_up or "PRACT" in sc_title_up
-                    if is_pract == sc_pract:
+                if title_clean:
+                    title_words = [w.lower() for w in title_clean.split() if len(w) > 3]
+                    if any(w in sc.course_title.lower() for w in title_words[:2]):
                         return sc
-                # Semester 3
-                if "MICR" in upper and "MICR" in sc_up:
-                    return sc
-                if "AHN" in upper and "AHN" in sc_up and semester_number == 3:
-                    is_pract = "PRACT" in upper or "(P)" in upper or "_P" in upper
-                    sc_pract = "(P)" in sc_up or "PRACT" in sc_title_up
-                    if is_pract == sc_pract:
-                        return sc
-                # Semester 4
-                if ("PHAR" in upper or "PATH" in upper or "GEN" in upper) and ("PHAR" in sc_up or "PATH" in sc_up):
-                    return sc
-                if "AHN" in upper and "AHN" in sc_up and semester_number == 4:
-                    is_pract = "PRACT" in upper or "(P)" in upper or "_P" in upper
-                    sc_pract = "(P)" in sc_up or "PRACT" in sc_title_up
-                    if is_pract == sc_pract:
-                        return sc
-                if "PROF" in upper and "PROF" in sc_up:
-                    return sc
-                # Semester 5
-                if "COMH" in upper and "COMH" in sc_up and semester_number == 5:
-                    is_pract = "PRACT" in upper or "(P)" in upper or "_P" in upper
-                    sc_pract = "(P)" in sc_up or "PRACT" in sc_title_up
-                    if is_pract == sc_pract:
-                        return sc
-                if "EDUC" in upper and "EDUC" in sc_up:
-                    return sc
-                if "FORN" in upper and "FORN" in sc_up:
-                    return sc
-                # Semester 6
-                if "CHN" in upper and "CHN" in sc_up:
-                    is_pract = "PRACT" in upper or "(P)" in upper or "_P" in upper
-                    sc_pract = "(P)" in sc_up or "PRACT" in sc_title_up
-                    if is_pract == sc_pract:
-                        return sc
-                if "MHN" in upper and "MHN" in sc_up:
-                    is_pract = "PRACT" in upper or "(P)" in upper or "_P" in upper
-                    sc_pract = "(P)" in sc_up or "PRACT" in sc_title_up
-                    if is_pract == sc_pract:
-                        return sc
-                if "NMLE" in upper and "NMLE" in sc_up:
-                    return sc
-        return course
+
+        return None
+
+    def get_course_by_code(
+        self,
+        semester_number: int,
+        course_code: str,
+        component_name: Optional[str] = None,
+        course_title: Optional[str] = None,
+        credits: Optional[float] = None,
+    ) -> Optional[Course]:
+        """Resolves course by exact code, fuzzy code, component name, or canonical acronym."""
+        return self.resolve_course(
+            semester_number=semester_number,
+            course_code=course_code,
+            component_name=component_name,
+            course_title=course_title,
+            credits=credits,
+        )
 
     def get_semester_courses(self, semester_number: int) -> List[Course]:
         """Returns all prescribed courses for a given semester."""
@@ -426,7 +520,307 @@ class ExaminationRepository:
                 mark.original_exam_month_year = original_exam_month_year
             self.session.flush()
 
+        # Automated Backlog Synchronization
+        is_passed = (course_result == "PASS" and (letter_grade or "").strip().upper() != "F")
+        try:
+            self.sync_course_backlog(
+                registration_id=registration_id,
+                course_id=course_id,
+                is_pass=is_passed,
+                internal_obtained=float(int_dec),
+                external_obtained=float(ext_dec),
+                total_obtained=float(tot_dec),
+                letter_grade=letter_grade,
+                course_result=course_result,
+            )
+        except Exception:
+            pass
+
         return mark
+
+    def get_next_examination_session(self, current_session: Optional[str]) -> str:
+        """
+        Computes the forthcoming examination session based on the biannual INC/SGPGIMS cycle:
+        - Winter / Odd semester cycle (January/December) -> Summer / July of the same year (e.g. 'JANUARY - 2026' -> 'JULY - 2026')
+        - Summer / Even semester cycle (July/June) -> Winter / January of the following year (e.g. 'JULY - 2026' -> 'JANUARY - 2027')
+        """
+        if not current_session:
+            return "JULY - 2026"
+
+        session_clean = current_session.strip().upper()
+        year_match = re.search(r"\b(20\d\d)\b", session_clean)
+        current_year = int(year_match.group(1)) if year_match else 2026
+
+        if any(m in session_clean for m in ["JAN", "DEC", "FEB", "MAR"]):
+            return f"JULY - {current_year}"
+        elif any(m in session_clean for m in ["JUL", "JUN", "AUG", "SEP", "OCT", "NOV"]):
+            return f"JANUARY - {current_year + 1}"
+        else:
+            return f"JULY - {current_year}"
+
+    def sync_course_backlog(
+        self,
+        registration_id: int,
+        course_id: int,
+        is_pass: bool,
+        internal_obtained: float = 0.0,
+        external_obtained: float = 0.0,
+        total_obtained: float = 0.0,
+        letter_grade: str = "F",
+        course_result: str = "FAIL",
+    ) -> Optional[StudentBacklog]:
+        """
+        Automated Backlog Tracking Engine:
+        - If student fails (course_result != 'PASS' or letter_grade == 'F' or not is_pass):
+          Automatically queues/updates student into `student_backlogs` with backlog_status='ACTIVE',
+          calculates deficit marks, determines failed component (INTERNAL, EXTERNAL, BOTH, etc.),
+          computes forthcoming examination session, and tracks attempt count.
+        - If student passes (course_result == 'PASS' and letter_grade != 'F' and is_pass):
+          Finds any existing ACTIVE backlog for (student_id, course_id) and marks it 'CLEARED'
+          with cleared_in_registration_id and cleared_at timestamp.
+        """
+        reg = self.session.query(StudentSemesterRegistration).filter_by(id=registration_id).first()
+        if not reg:
+            return None
+
+        student_id = reg.student_id
+        semester_number = reg.semester_number
+        exam_session = reg.exam_month_year or "JANUARY - 2026"
+
+        course = self.session.query(Course).filter_by(id=course_id).first()
+
+        # Check if student passed
+        passed_condition = (
+            is_pass
+            and (course_result or "").strip().upper() == "PASS"
+            and (letter_grade or "").strip().upper() != "F"
+        )
+
+        active_backlog = (
+            self.session.query(StudentBacklog)
+            .filter_by(student_id=student_id, course_id=course_id, backlog_status="ACTIVE")
+            .first()
+        )
+
+        if passed_condition:
+            if active_backlog:
+                active_backlog.backlog_status = "CLEARED"
+                active_backlog.cleared_in_registration_id = registration_id
+                active_backlog.cleared_at = func.now()
+                self.session.flush()
+                return active_backlog
+            return None
+
+        # Student failed: calculate deficit and failed component
+        pass_pct = float(course.min_pass_pct) if course and course.min_pass_pct is not None else 50.0
+        max_tot = float(course.max_total) if course and course.max_total is not None else 100.0
+        passing_threshold = round(max_tot * (pass_pct / 100.0), 2)
+        tot_obtd = float(total_obtained or 0.0)
+        overall_deficit = max(0.0, round(passing_threshold - tot_obtd, 2))
+
+        # Determine failed component
+        max_ia = float(course.max_internal) if course and course.max_internal is not None else 0.0
+        max_ea = float(course.max_external) if course and course.max_external is not None else 0.0
+        min_ia = round(max_ia * (pass_pct / 100.0), 2) if max_ia > 0 else 0.0
+        min_ea = round(max_ea * (pass_pct / 100.0), 2) if max_ea > 0 else 0.0
+
+        int_ob = float(internal_obtained or 0.0)
+        ext_ob = float(external_obtained or 0.0)
+
+        int_fail_deficit = max(0.0, round(min_ia - int_ob, 2)) if max_ia > 0 else 0.0
+        ext_fail_deficit = max(0.0, round(min_ea - ext_ob, 2)) if max_ea > 0 else 0.0
+
+        if max_ia > 0 and max_ea > 0:
+            int_fail = int_ob < min_ia
+            ext_fail = ext_ob < min_ea
+            if int_fail and ext_fail:
+                failed_comp = "INTERNAL & EXTERNAL"
+            elif int_fail:
+                failed_comp = "INTERNAL"
+            elif ext_fail:
+                failed_comp = "EXTERNAL"
+            else:
+                failed_comp = "THEORY" if getattr(course, "is_theory", True) else "PRACTICAL"
+        else:
+            if getattr(course, "is_practical", False) and not getattr(course, "is_theory", True):
+                failed_comp = "PRACTICAL"
+            else:
+                failed_comp = "THEORY"
+
+        # Deficit is either the total mark deficit or component deficit, whichever is greater
+        component_deficit = int_fail_deficit + ext_fail_deficit
+        deficit = max(overall_deficit, component_deficit)
+
+        forthcoming = self.get_next_examination_session(exam_session)
+
+        # Academic year derivation
+        m = re.search(r"\b(20\d\d)\b", exam_session)
+        y = int(m.group(1)) if m else 2026
+        acad_year = f"{y-1}-{y}"
+
+        if active_backlog:
+            active_backlog.deficit_marks = Decimal(str(deficit))
+            active_backlog.failed_component = failed_comp
+            active_backlog.forthcoming_exam_month_year = forthcoming
+            if active_backlog.original_registration_id != registration_id:
+                active_backlog.attempt_count = (active_backlog.attempt_count or 1) + 1
+            self.session.flush()
+            return active_backlog
+        else:
+            new_backlog = StudentBacklog(
+                student_id=student_id,
+                course_id=course_id,
+                original_registration_id=registration_id,
+                failed_exam_month_year=exam_session,
+                forthcoming_exam_month_year=forthcoming,
+                semester_number=semester_number,
+                academic_year=acad_year,
+                failed_component=failed_comp,
+                deficit_marks=Decimal(str(deficit)),
+                attempt_count=1,
+                backlog_status="ACTIVE",
+            )
+            self.session.add(new_backlog)
+            self.session.flush()
+            return new_backlog
+
+    def sync_all_unregistered_backlogs(self) -> int:
+        """
+        Backfills and synchronizes all historical failed course marks into student_backlogs.
+        Scans all student_course_marks records where course_result == 'FAIL' or letter_grade in ('F', 'Ab'),
+        and executes sync_course_backlog. Returns total active backlogs synchronized.
+        """
+        failed_marks = (
+            self.session.query(StudentCourseMark)
+            .join(StudentSemesterRegistration, StudentCourseMark.registration_id == StudentSemesterRegistration.id)
+            .filter(
+                or_(
+                    StudentCourseMark.course_result == "FAIL",
+                    StudentCourseMark.letter_grade == "F",
+                    StudentCourseMark.letter_grade == "Ab",
+                )
+            )
+            .order_by(StudentSemesterRegistration.id.asc())
+            .all()
+        )
+
+        synced_count = 0
+        for fm in failed_marks:
+            reg = self.session.query(StudentSemesterRegistration).filter_by(id=fm.registration_id).first()
+            if not reg:
+                continue
+
+            # Check if this student cleared this subject in a later registration
+            subsequent_pass = (
+                self.session.query(StudentCourseMark)
+                .join(StudentSemesterRegistration, StudentCourseMark.registration_id == StudentSemesterRegistration.id)
+                .filter(
+                    StudentSemesterRegistration.student_id == reg.student_id,
+                    StudentCourseMark.course_id == fm.course_id,
+                    StudentSemesterRegistration.id > reg.id,
+                    StudentCourseMark.course_result == "PASS",
+                    StudentCourseMark.letter_grade != "F",
+                )
+                .first()
+            )
+
+            if subsequent_pass:
+                active = (
+                    self.session.query(StudentBacklog)
+                    .filter_by(student_id=reg.student_id, course_id=fm.course_id, backlog_status="ACTIVE")
+                    .first()
+                )
+                if active:
+                    active.backlog_status = "CLEARED"
+                    active.cleared_in_registration_id = subsequent_pass.registration_id
+                    active.cleared_at = func.now()
+            else:
+                self.sync_course_backlog(
+                    registration_id=fm.registration_id,
+                    course_id=fm.course_id,
+                    is_pass=False,
+                    internal_obtained=float(fm.internal_obtained or 0),
+                    external_obtained=float(fm.external_obtained or 0),
+                    total_obtained=float(fm.total_obtained or 0),
+                    letter_grade=fm.letter_grade or "F",
+                    course_result=fm.course_result or "FAIL",
+                )
+                synced_count += 1
+
+        self.session.commit()
+        return synced_count
+
+    def get_backlog_roster(
+        self,
+        semester_number: Optional[int] = None,
+        backlog_status: str = "ACTIVE",
+        forthcoming_session: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Retrieves formatted backlog candidates roster for administrative scheduling and re-examination sitting tags.
+        """
+        query = (
+            self.session.query(
+                StudentBacklog,
+                Student,
+                Course,
+                StudentSemesterRegistration,
+            )
+            .join(Student, StudentBacklog.student_id == Student.id)
+            .join(Course, StudentBacklog.course_id == Course.id)
+            .join(StudentSemesterRegistration, StudentBacklog.original_registration_id == StudentSemesterRegistration.id)
+        )
+
+        if backlog_status and backlog_status.upper() != "ALL":
+            query = query.filter(StudentBacklog.backlog_status == backlog_status.upper())
+
+        if semester_number:
+            query = query.filter(StudentBacklog.semester_number == semester_number)
+
+        if forthcoming_session and forthcoming_session.strip() and forthcoming_session.strip().lower() != "all":
+            query = query.filter(StudentBacklog.forthcoming_exam_month_year.ilike(f"%{forthcoming_session.strip()}%"))
+
+        query = query.order_by(
+            StudentBacklog.semester_number.asc(),
+            Student.roll_no.asc(),
+            Course.course_code.asc(),
+        )
+
+        records = query.all()
+        roster = []
+        roman_numerals = ["I", "II", "III", "IV", "V", "VI", "VII", "VIII"]
+        for b, s, c, r in records:
+            att_cnt = int(b.attempt_count or 1)
+            att_roman = roman_numerals[att_cnt - 1] if 1 <= att_cnt <= len(roman_numerals) else str(att_cnt)
+            att_label = f"REAPPEAR - {att_roman}"
+            comp_failed = b.failed_component or ("THEORY" if c.is_theory else "PRACTICAL")
+
+            roster.append({
+                "backlog_id": b.id,
+                "student_id": s.id,
+                "roll_no": s.roll_no,
+                "enrollment_no": s.enrollment_no,
+                "student_name": s.student_name,
+                "father_name": s.father_name,
+                "course_id": c.id,
+                "course_code": c.course_code,
+                "course_title": c.course_title,
+                "failed_semester": b.semester_number,
+                "semester_number": b.semester_number,
+                "failed_subject_code": c.course_code,
+                "failed_subject_title": c.course_title,
+                "component_failed": comp_failed,
+                "failed_component": comp_failed,
+                "deficit_marks": float(b.deficit_marks) if b.deficit_marks is not None else 0.0,
+                "attempt_count": att_cnt,
+                "attempt_label": att_label,
+                "backlog_status": b.backlog_status,
+                "failed_exam_month_year": b.failed_exam_month_year,
+                "forthcoming_exam_month_year": b.forthcoming_exam_month_year,
+                "created_at": b.created_at.isoformat() if b.created_at else None,
+                "cleared_at": b.cleared_at.isoformat() if b.cleared_at else None,
+            })
+        return roster
 
     def resolve_reappear_exemptions(
         self,
@@ -526,6 +920,19 @@ class ExaminationRepository:
                     cm.course_result = "PASS"
                     cm.is_exempted = True
                     cm.original_exam_month_year = exam_session
+                    try:
+                        self.sync_course_backlog(
+                            registration_id=current_registration_id,
+                            course_id=c.id,
+                            is_pass=True,
+                            internal_obtained=float(cm.internal_obtained),
+                            external_obtained=float(cm.external_obtained),
+                            total_obtained=float(cm.total_obtained),
+                            letter_grade=cm.letter_grade,
+                            course_result="PASS",
+                        )
+                    except Exception:
+                        pass
 
         self.session.flush()
 

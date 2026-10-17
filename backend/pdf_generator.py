@@ -12,6 +12,7 @@ import os
 import re
 import io
 import sys
+import types
 import asyncio
 import zipfile
 from contextlib import contextmanager
@@ -57,6 +58,94 @@ def clean_filename_token(val: str) -> str:
     """Sanitizes strings for safe cross-platform filenames."""
     s = re.sub(r'[^\w\s-]', '', str(val)).strip()
     return re.sub(r'[-\s]+', '_', s)
+
+
+def sanitize_proper_case_name(name: str) -> str:
+    """
+    Sanitizes candidate names for structured marksheet file export:
+    - Strips characters forbidden in Windows/Linux file paths (\\ / : * ? " < > |)
+    - Replaces consecutive spaces with a single space
+    - Converts to Proper Title Case
+    """
+    if not name:
+        return "Student"
+    cleaned = re.sub(r'[\\/:*?"<>|]', '', str(name))
+    cleaned = re.sub(r'\s+', ' ', cleaned).strip()
+    return cleaned.title()
+
+
+def build_export_filepath(
+    base_dir: str,
+    academic_year: str,
+    exam_session: str,
+    semester: int,
+    student_name: str,
+    roll_no: str
+) -> tuple[str, str, str]:
+    """
+    Builds the standardized structured marksheet path:
+    {MARKSHEET_STORAGE_DIR}/{Academic_Year}/{Exam_Session}/Semester_{N}/{Proper_Name}_{Roll_No}.pdf
+    Returns (directory_path, filename, full_path).
+    Ensures missing directories are created automatically via os.makedirs(..., exist_ok=True).
+    """
+    clean_name = sanitize_proper_case_name(student_name)
+    clean_roll = re.sub(r'[\\/:*?"<>|\s]', '', str(roll_no)).strip()
+    filename = f"{clean_name}_{clean_roll}.pdf"
+
+    # Clean session for directory name (e.g., 'JANUARY - 2026' -> 'JANUARY_2026')
+    clean_session = re.sub(r'[^A-Za-z0-9]+', '_', str(exam_session)).strip('_') or "SESSION"
+    year_str = str(academic_year).strip()
+
+    dir_path = os.path.join(base_dir, year_str, clean_session, f"Semester_{semester}")
+    os.makedirs(dir_path, exist_ok=True)
+    full_path = os.path.join(dir_path, filename)
+    return dir_path, filename, full_path
+
+
+class MarksheetStudentAdapter:
+    """
+    Adapts database marksheet dictionary (from ExaminationRepository.get_student_marksheet_data)
+    into a dot-accessible structure compatible with MarksheetPdfGenerator and Jinja2 templates.
+    """
+    def __init__(self, data: Dict[str, Any]):
+        self.data = data
+        stu = data.get("student", {})
+        self.student_name = stu.get("name") or stu.get("student_name", "")
+        self.enroll_no = stu.get("enrollment_no") or stu.get("enroll_no", "")
+        self.father_name = stu.get("father_name", "")
+        self.roll_no = stu.get("roll_no", "")
+        self.institutional_status = stu.get("institutional_status", "REGULAR")
+        self.batch_name = stu.get("batch_name", "Batch 2022-2026")
+
+        self.total_marks_obtained = data.get("grand_total_obtained", 0.0)
+        self.total_marks_max = data.get("grand_total_max", 0.0)
+        self.overall_percentage = data.get("percentage", 0.0)
+        self.sgpa = data.get("sgpa")
+        self.semester_credit_score = data.get("credit_score", 0.0)
+        self.result_status = data.get("result_status", "PASS")
+        self.failed_courses = data.get("failed_courses", [])
+        self.attempt_label = data.get("attempt_label", "MAIN")
+        self.attempt_number = data.get("attempt_number", 0)
+        self.attempt_indicator = data.get("attempt_indicator")
+
+        # Adapt courses
+        courses_dict = {}
+        for idx, c in enumerate(data.get("courses", [])):
+            ci = types.SimpleNamespace()
+            for k, v in c.items():
+                setattr(ci, k, v)
+            if not hasattr(ci, "internal_marks"):
+                ci.internal_marks = c.get("internal_obtained", 0.0)
+            if not hasattr(ci, "effective_external"):
+                ci.effective_external = c.get("external_obtained", 0.0)
+            if not hasattr(ci, "total_marks"):
+                ci.total_marks = c.get("total_obtained", 0.0)
+            if not hasattr(ci, "credit_breakdown"):
+                ci.credit_breakdown = None
+            code_key = c.get("course_code", f"c_{idx}")
+            courses_dict[code_key] = ci
+
+        self.courses = courses_dict
 
 
 def format_mark(val: Any) -> str:
